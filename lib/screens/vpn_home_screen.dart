@@ -39,6 +39,7 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
   bool _updatingSubscription = false;
   bool _showUuid = false;
   bool _serversExpanded = true;
+  final Map<String, bool> _expandedServerGroups = {};
   String? _subscriptionError;
 
   @override
@@ -226,6 +227,11 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
   }) {
     final theme = Theme.of(context);
     final canConnect = _runtime.supports(_selectedMode);
+    final profilesByGroup = <String, List<SubscriptionProfile>>{};
+    for (final profile in _profiles) {
+      profilesByGroup.putIfAbsent(profile.groupKey, () => []).add(profile);
+    }
+    final ungroupedProfiles = profilesByGroup.remove('ungrouped');
 
     return SingleChildScrollView(
       padding: const EdgeInsets.fromLTRB(24, 10, 24, 28),
@@ -323,16 +329,55 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
                     ),
                   ),
                   if (_serversExpanded) ...[
-                    for (var index = 0; index < _profiles.length; index++) ...[
-                      if (index > 0) const SizedBox(height: 4),
-                      _ServerOption(
-                        profile: _profiles[index],
-                        selected: identical(_profiles[index], _selectedProfile),
-                        connected: isRunning &&
-                            identical(_profiles[index], _selectedProfile),
-                        enabled: !isBusy && !_switchingServer,
-                        onTap: () => _selectProfile(_profiles[index]),
+                    for (final profiles in profilesByGroup.values) ...[
+                      _ServerGroupHeader(
+                        name: profiles.first.groupName,
+                        count: profiles.length,
+                        expanded:
+                            _expandedServerGroups[profiles.first.groupKey] ??
+                                true,
+                        onTap: () => setState(() {
+                          final key = profiles.first.groupKey;
+                          _expandedServerGroups[key] =
+                              !(_expandedServerGroups[key] ?? true);
+                        }),
                       ),
+                      if (_expandedServerGroups[profiles.first.groupKey] ??
+                          true) ...[
+                        const SizedBox(height: 4),
+                        for (final profile in profiles)
+                          _ServerOption(
+                            profile: profile,
+                            selected: identical(profile, _selectedProfile),
+                            connected: isRunning &&
+                                identical(profile, _selectedProfile),
+                            enabled: !isBusy && !_switchingServer,
+                            onTap: () => _selectProfile(profile),
+                          ),
+                      ],
+                    ],
+                    if (ungroupedProfiles != null) ...[
+                      _ServerGroupHeader(
+                        name: 'Без группы',
+                        count: ungroupedProfiles.length,
+                        expanded: _expandedServerGroups['ungrouped'] ?? true,
+                        onTap: () => setState(() {
+                          _expandedServerGroups['ungrouped'] =
+                              !(_expandedServerGroups['ungrouped'] ?? true);
+                        }),
+                      ),
+                      if (_expandedServerGroups['ungrouped'] ?? true) ...[
+                        const SizedBox(height: 4),
+                        for (final profile in ungroupedProfiles)
+                          _ServerOption(
+                            profile: profile,
+                            selected: identical(profile, _selectedProfile),
+                            connected: isRunning &&
+                                identical(profile, _selectedProfile),
+                            enabled: !isBusy && !_switchingServer,
+                            onTap: () => _selectProfile(profile),
+                          ),
+                      ],
                     ],
                   ],
                 ],
@@ -532,6 +577,59 @@ class _PowerControl extends StatelessWidget {
                 : AppTheme.primary.withValues(alpha: 0.6),
             side: BorderSide(color: color, width: 2),
             shape: const CircleBorder(),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _ServerGroupHeader extends StatelessWidget {
+  const _ServerGroupHeader({
+    required this.name,
+    required this.count,
+    required this.expanded,
+    required this.onTap,
+  });
+
+  final String name;
+  final int count;
+  final bool expanded;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Padding(
+      padding: const EdgeInsets.only(top: 8),
+      child: Material(
+        color: Colors.transparent,
+        borderRadius: BorderRadius.circular(10),
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(10),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 7),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    '$name · $count',
+                    style: theme.textTheme.labelMedium?.copyWith(
+                      color: theme.colorScheme.onSurfaceVariant,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ),
+                Icon(
+                  expanded
+                      ? Icons.keyboard_arrow_up_rounded
+                      : Icons.keyboard_arrow_down_rounded,
+                  size: 20,
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+              ],
+            ),
           ),
         ),
       ),

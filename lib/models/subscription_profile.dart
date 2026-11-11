@@ -14,6 +14,28 @@ class SubscriptionProfile {
     return 'Сервер $index';
   }
 
+  String get groupName {
+    final value = configuration['group'];
+    if (value is Map) {
+      final name = value['name'];
+      if (name is String && name.trim().isNotEmpty) return name.trim();
+    }
+    return 'Без группы';
+  }
+
+  String get groupKey {
+    final value = configuration['group'];
+    if (value is Map) {
+      final id = value['id'];
+      if (id != null) return 'id:${id.toString()}';
+      final name = value['name'];
+      if (name is String && name.trim().isNotEmpty) {
+        return 'name:${name.trim()}';
+      }
+    }
+    return 'ungrouped';
+  }
+
   List<Map<String, dynamic>> get inbounds {
     final value = configuration['inbounds'];
     if (value is! List) return const [];
@@ -25,6 +47,8 @@ class SubscriptionProfile {
   }
 
   Map<String, dynamic> toRuntimeConfiguration() {
-    return Map<String, dynamic>.from(configuration);
+    final runtimeConfiguration = Map<String, dynamic>.from(configuration)
+      ..remove('group');
+    return runtimeConfiguration;
   }
 }
