@@ -224,7 +224,7 @@ final class VpnDaemon {
       try? stop()
       throw Self.error(didExit
         ? "Xray exited during startup. Check the selected server profile."
-        : "Xray did not create a macOS tunnel interface.")
+        : "Xray did not create the VPN tunnel interface.")
     }
     do {
       try configureSystemDNS(from: profile["dns"])
@@ -284,7 +284,7 @@ final class VpnDaemon {
       }
     } catch {
       restoreSystemDNS()
-      throw Self.error("Could not route macOS DNS through the VPN.")
+      throw Self.error("Could not route DNS through the VPN.")
     }
   }
 
@@ -314,7 +314,7 @@ final class VpnDaemon {
     try process.run()
     process.waitUntilExit()
     guard process.terminationStatus == 0 else {
-      throw Self.error("A required macOS network setting could not be changed.")
+      throw Self.error("A required network setting could not be changed.")
     }
     return String(data: output.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
   }

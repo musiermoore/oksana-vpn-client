@@ -38,11 +38,11 @@ class MacosProxyRuntime implements VpnRuntime {
   Future<void> connect(SubscriptionProfile profile, VpnMode mode) async {
     if (!Platform.isMacOS) {
       throw const VpnRuntimeException(
-          'Пока поддерживается только macOS ARM64.');
+          'Прокси-режим недоступен на этом устройстве.');
     }
     if (Abi.current() != Abi.macosArm64) {
       throw const VpnRuntimeException(
-          'Сейчас поддерживается только Apple Silicon (ARM64).');
+          'Текущая версия приложения не поддерживает это устройство.');
     }
     if (_process != null) {
       throw const VpnRuntimeException('Xray уже запущен.');
@@ -57,7 +57,7 @@ class MacosProxyRuntime implements VpnRuntime {
       final executable = _resolveExecutable();
       if (!await executable.exists()) {
         throw const VpnRuntimeException(
-          'Xray не найден в сборке. Добавьте macOS ARM64 binary в Resources.',
+          'Компонент Xray не найден. Переустановите приложение или обратитесь в поддержку.',
         );
       }
       _ensureNotDisposed();
@@ -115,11 +115,9 @@ class MacosProxyRuntime implements VpnRuntime {
       _phase = VpnRuntimePhase.error;
       _errorMessage = switch (error) {
         VpnRuntimeException runtimeError => runtimeError.message,
-        ProcessException processError =>
-          'Не удалось запустить Xray: ${processError.message} (код ${processError.errorCode}).',
-        FileSystemException fileError =>
-          'Не удалось подготовить файлы Xray: ${fileError.osError?.message ?? 'ошибка доступа'}.',
-        _ => 'Не удалось запустить локальный proxy (${error.runtimeType}).',
+        ProcessException() => 'Не удалось запустить компонент VPN.',
+        FileSystemException() => 'Не удалось подготовить файлы VPN.',
+        _ => 'Не удалось запустить локальный proxy.',
       };
       _publish();
       if (error is VpnRuntimeException) rethrow;

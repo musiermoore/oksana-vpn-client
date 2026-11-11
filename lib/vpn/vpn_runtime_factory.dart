@@ -6,5 +6,5 @@ import 'vpn_runtime.dart';
 VpnRuntime createVpnRuntime() {
   if (Platform.isMacOS) return MacosVpnRuntime();
 
-  throw UnsupportedError('Для этой платформы VPN runtime ещё не реализован.');
+  throw UnsupportedError('VPN пока недоступен на этом устройстве.');
 }

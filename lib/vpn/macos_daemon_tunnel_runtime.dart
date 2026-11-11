@@ -7,8 +7,7 @@ import '../models/subscription_profile.dart';
 import 'vpn_runtime.dart';
 
 class MacosDaemonTunnelRuntime implements VpnRuntime {
-  static const _socketPath =
-      '/var/run/com.oksana1984.oksanaVpnDesktop.sock';
+  static const _socketPath = '/var/run/com.oksana1984.oksanaVpnDesktop.sock';
   static const _maximumResponseWait = Duration(seconds: 30);
 
   final StreamController<VpnRuntimeSnapshot> _changes =
@@ -43,7 +42,7 @@ class MacosDaemonTunnelRuntime implements VpnRuntime {
   Future<void> connect(SubscriptionProfile profile, VpnMode mode) async {
     if (!supports(mode)) {
       throw const VpnRuntimeException(
-          'TUN поддерживается только в macOS ARM64.');
+          'Режим TUN недоступен на этом устройстве.');
     }
     if (_phase == VpnRuntimePhase.running ||
         _phase == VpnRuntimePhase.starting) {
@@ -69,7 +68,7 @@ class MacosDaemonTunnelRuntime implements VpnRuntime {
       rethrow;
     } on SocketException {
       _setPhase(VpnRuntimePhase.error);
-      _errorMessage = 'Не удалось связаться с VPN-службой macOS.';
+      _errorMessage = 'Не удалось связаться со службой VPN.';
       _publish();
       throw VpnRuntimeException(_errorMessage!);
     } on ProcessException {
@@ -102,7 +101,7 @@ class MacosDaemonTunnelRuntime implements VpnRuntime {
       rethrow;
     } on SocketException {
       _setPhase(VpnRuntimePhase.error);
-      _errorMessage = 'Не удалось связаться с VPN-службой macOS.';
+      _errorMessage = 'Не удалось связаться со службой VPN.';
       _publish();
       throw VpnRuntimeException(_errorMessage!);
     }
@@ -189,11 +188,13 @@ class MacosDaemonTunnelRuntime implements VpnRuntime {
 
     final uidResult = await Process.run('/usr/bin/id', ['-u']);
     if (uidResult.exitCode != 0) {
-      throw const ProcessException('/usr/bin/id', [], 'Could not determine the current user.');
+      throw const ProcessException(
+          '/usr/bin/id', [], 'Could not determine the current user.');
     }
     final uid = (uidResult.stdout as String).trim();
     if (!RegExp(r'^[1-9][0-9]*$').hasMatch(uid)) {
-      throw const VpnRuntimeException('Не удалось определить учётную запись macOS.');
+      throw const VpnRuntimeException(
+          'Не удалось определить текущую учётную запись.');
     }
 
     const appleScript = '''
@@ -277,7 +278,7 @@ end run
       } on Object {
         if (_phase == VpnRuntimePhase.running) {
           _setPhase(VpnRuntimePhase.error);
-          _errorMessage = 'Потеряна связь с VPN-службой macOS.';
+          _errorMessage = 'Потеряна связь со службой VPN.';
           _publish();
         }
       } finally {

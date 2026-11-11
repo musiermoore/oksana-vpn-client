@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../services/subscription_api.dart';
@@ -16,7 +18,9 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
   final _uuidController = TextEditingController();
   final _api = SubscriptionApi();
   final _subscriptionStore = const SubscriptionStore();
+  bool _restoring = true;
   bool _loading = false;
+  bool _showUuid = false;
   String? _error;
 
   @override
@@ -28,16 +32,24 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
   Future<void> _restoreSavedUuid() async {
     try {
       final uuid = await _subscriptionStore.readUuid();
-      if (!mounted || uuid == null || _uuidController.text.isNotEmpty) return;
+      if (!mounted) return;
+      if (uuid == null || _uuidController.text.isNotEmpty) {
+        setState(() => _restoring = false);
+        return;
+      }
 
       _uuidController.value = TextEditingValue(
         text: uuid,
         selection: TextSelection.collapsed(offset: uuid.length),
       );
+      setState(() => _restoring = false);
+      await _loadSubscription(uuid: uuid, saveUuid: false);
     } catch (_) {
       if (mounted) {
-        setState(
-            () => _error = 'Не удалось прочитать UUID из Связки ключей macOS.');
+        setState(() {
+          _restoring = false;
+          _error = 'Не удалось восстановить сохранённый код подписки.';
+        });
       }
     }
   }
@@ -49,7 +61,7 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
     super.dispose();
   }
 
-  Future<void> _loadSubscription() async {
+  Future<void> _loadSubscription({String? uuid, bool saveUuid = true}) async {
     FocusScope.of(context).unfocus();
     String? storageWarning;
     setState(() {
@@ -58,17 +70,17 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
     });
 
     try {
-      final uuid = _uuidController.text.trim();
-      if (SubscriptionApi.isValidUuid(uuid)) {
+      final value = (uuid ?? _uuidController.text).trim();
+      final profiles = await _api.fetchProfiles(value);
+      if (saveUuid && SubscriptionApi.isValidUuid(value)) {
         try {
-          await _subscriptionStore.saveUuid(uuid);
+          await _subscriptionStore.saveUuid(value);
         } catch (_) {
           storageWarning =
-              'UUID не удалось сохранить в Связке ключей macOS. Подписка всё равно будет загружена.';
+              'Код не удалось сохранить на устройстве. Подписка всё равно будет загружена.';
         }
       }
 
-      final profiles = await _api.fetchProfiles(uuid);
       if (!mounted) return;
       if (storageWarning != null) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -76,9 +88,14 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
         );
       }
 
-      await Navigator.of(context).push(
-        MaterialPageRoute<void>(
-          builder: (_) => VpnHomeScreen(profiles: profiles),
+      unawaited(
+        Navigator.of(context).pushReplacement<void, void>(
+          MaterialPageRoute<void>(
+            builder: (_) => VpnHomeScreen(
+              profiles: profiles,
+              subscriptionUuid: value,
+            ),
+          ),
         ),
       );
     } on SubscriptionApiException catch (error) {
@@ -97,8 +114,6 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final colors = theme.colorScheme;
-
     return Scaffold(
       body: SafeArea(
         child: Center(
@@ -111,83 +126,126 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
                 children: [
                   const BrandHeader(
                     title: 'Oksana VPN',
-                    description: 'Безопасное подключение к вашей подписке.',
                   ),
                   const SizedBox(height: 34),
-                  Card(
-                    child: Padding(
-                      padding: const EdgeInsets.all(24),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: [
-                          Text('Подключите подписку',
-                              style: theme.textTheme.titleMedium
-                                  ?.copyWith(fontWeight: FontWeight.w700)),
-                          const SizedBox(height: 8),
-                          Text(
-                            'Введите UUID подписки, чтобы загрузить доступные серверы.',
-                            style: theme.textTheme.bodyMedium
-                                ?.copyWith(color: colors.onSurfaceVariant),
-                          ),
-                          const SizedBox(height: 22),
-                          TextField(
-                            controller: _uuidController,
-                            enabled: !_loading,
-                            autocorrect: false,
-                            enableSuggestions: false,
-                            keyboardType: TextInputType.text,
-                            textCapitalization: TextCapitalization.none,
-                            onSubmitted: (_) async {
-                              if (!_loading) await _loadSubscription();
-                            },
-                            decoration: const InputDecoration(
-                              labelText: 'UUID подписки',
-                              hintText: 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx',
-                              prefixIcon: Icon(Icons.key_rounded),
+                  if (_restoring || _loading)
+                    Card(
+                      child: Padding(
+                        padding: const EdgeInsets.all(28),
+                        child: Column(
+                          children: [
+                            const SizedBox(
+                              width: 26,
+                              height: 26,
+                              child:
+                                  CircularProgressIndicator(strokeWidth: 2.5),
                             ),
-                          ),
-                          if (_error != null) ...[
-                            const SizedBox(height: 14),
-                            _InlineMessage(message: _error!),
+                            const SizedBox(height: 16),
+                            Text(
+                              _restoring
+                                  ? 'Проверяем подписку…'
+                                  : 'Загружаем подписку…',
+                              style: theme.textTheme.bodyMedium,
+                            ),
                           ],
-                          const SizedBox(height: 18),
-                          FilledButton.icon(
-                            onPressed: _loading ? null : _loadSubscription,
-                            icon: _loading
-                                ? const SizedBox(
-                                    width: 18,
-                                    height: 18,
-                                    child: CircularProgressIndicator(
-                                        strokeWidth: 2, color: Colors.white),
-                                  )
-                                : const Icon(Icons.arrow_forward_rounded),
-                            label: Text(_loading
-                                ? 'Загружаем подписку…'
-                                : 'Продолжить'),
-                          ),
-                        ],
+                        ),
+                      ),
+                    )
+                  else
+                    Card(
+                      child: Padding(
+                        padding: const EdgeInsets.all(24),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            Row(
+                              children: [
+                                Expanded(
+                                  child: Text(
+                                    'Подписка',
+                                    style:
+                                        theme.textTheme.titleMedium?.copyWith(
+                                      fontWeight: FontWeight.w700,
+                                    ),
+                                  ),
+                                ),
+                                IconButton(
+                                  tooltip: 'О хранении кода',
+                                  onPressed: _showUuidInfo,
+                                  icon: const Icon(Icons.info_outline_rounded),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 8),
+                            TextField(
+                              controller: _uuidController,
+                              enabled: !_loading,
+                              autocorrect: false,
+                              enableSuggestions: false,
+                              obscureText: !_showUuid,
+                              keyboardType: TextInputType.text,
+                              textCapitalization: TextCapitalization.none,
+                              onSubmitted: (_) async {
+                                if (!_loading) await _loadSubscription();
+                              },
+                              decoration: InputDecoration(
+                                labelText: 'UUID подписки',
+                                prefixIcon: const Icon(Icons.key_rounded),
+                                suffixIcon: IconButton(
+                                  tooltip:
+                                      _showUuid ? 'Скрыть код' : 'Показать код',
+                                  onPressed: () =>
+                                      setState(() => _showUuid = !_showUuid),
+                                  icon: Icon(_showUuid
+                                      ? Icons.visibility_off_rounded
+                                      : Icons.visibility_rounded),
+                                ),
+                              ),
+                            ),
+                            if (_error != null) ...[
+                              const SizedBox(height: 14),
+                              _InlineMessage(message: _error!),
+                            ],
+                            const SizedBox(height: 18),
+                            FilledButton.icon(
+                              onPressed: _loading ? null : _loadSubscription,
+                              icon: _loading
+                                  ? const SizedBox(
+                                      width: 18,
+                                      height: 18,
+                                      child: CircularProgressIndicator(
+                                          strokeWidth: 2, color: Colors.white),
+                                    )
+                                  : const Icon(Icons.arrow_forward_rounded),
+                              label: Text(_loading
+                                  ? 'Загружаем подписку…'
+                                  : 'Продолжить'),
+                            ),
+                          ],
+                        ),
                       ),
                     ),
-                  ),
-                  const SizedBox(height: 16),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Icon(Icons.lock_outline_rounded,
-                          size: 15, color: colors.onSurfaceVariant),
-                      const SizedBox(width: 7),
-                      Text(
-                        'После нажатия «Продолжить» UUID сохранится в Связке ключей macOS',
-                        style: theme.textTheme.bodySmall
-                            ?.copyWith(color: colors.onSurfaceVariant),
-                      ),
-                    ],
-                  ),
                 ],
               ),
             ),
           ),
         ),
+      ),
+    );
+  }
+
+  Future<void> _showUuidInfo() async {
+    await showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Код подписки'),
+        content: const Text('Код подписки сохраняется на устройстве.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Понятно'),
+          ),
+        ],
       ),
     );
   }
