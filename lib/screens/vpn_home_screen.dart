@@ -20,6 +20,12 @@ import 'subscription_screen.dart';
 final _connectivityTestUri =
     Uri.https('connectivitycheck.gstatic.com', '/generate_204');
 
+int _compareGroupOrders(int? a, int? b) {
+  if (a == null) return b == null ? 0 : 1;
+  if (b == null) return -1;
+  return a.compareTo(b);
+}
+
 class VpnHomeScreen extends StatefulWidget {
   const VpnHomeScreen({
     super.key,
@@ -914,7 +920,10 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
 
   List<List<SubscriptionProfile>> _sortedProfileGroups() {
     final grouped = <String, List<SubscriptionProfile>>{};
-    for (final profile in _profiles) {
+    final firstGroupIndex = <String, int>{};
+    for (var i = 0; i < _profiles.length; i++) {
+      final profile = _profiles[i];
+      firstGroupIndex.putIfAbsent(profile.groupKey, () => i);
       grouped.putIfAbsent(profile.groupKey, () => []).add(profile);
     }
 
@@ -922,7 +931,13 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
         .where((profile) =>
             profile.groupIsDefault && profile.groupKey != 'ungrouped')
         .toList()
-      ..sort((a, b) => a.groupSortOrder.compareTo(b.groupSortOrder));
+      ..sort((a, b) {
+        final orderComparison =
+            _compareGroupOrders(a.groupSortOrder, b.groupSortOrder);
+        if (orderComparison != 0) return orderComparison;
+        return firstGroupIndex[a.groupKey]!
+            .compareTo(firstGroupIndex[b.groupKey]!);
+      });
     if (defaultGroupProfiles.isNotEmpty) {
       final ungrouped = grouped.remove('ungrouped');
       if (ungrouped != null) {
@@ -932,17 +947,25 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
 
     final groups = grouped.values.toList()
       ..sort((a, b) {
+        final orderComparison = _compareGroupOrders(
+          _groupMetadataProfile(a).groupSortOrder,
+          _groupMetadataProfile(b).groupSortOrder,
+        );
+        if (orderComparison != 0) return orderComparison;
         final aDefault = a.any((profile) => profile.groupIsDefault) ||
             a.first.groupKey == 'ungrouped';
         final bDefault = b.any((profile) => profile.groupIsDefault) ||
             b.first.groupKey == 'ungrouped';
         if (aDefault != bDefault) return aDefault ? 1 : -1;
-        return _groupMetadataProfile(a)
-            .groupSortOrder
-            .compareTo(_groupMetadataProfile(b).groupSortOrder);
+        return firstGroupIndex[a.first.groupKey]!
+            .compareTo(firstGroupIndex[b.first.groupKey]!);
       });
     for (final group in groups) {
-      group.sort((a, b) => a.sortOrder.compareTo(b.sortOrder));
+      group.sort((a, b) {
+        final orderComparison = a.sortOrder.compareTo(b.sortOrder);
+        if (orderComparison != 0) return orderComparison;
+        return a.index.compareTo(b.index);
+      });
     }
     return groups;
   }

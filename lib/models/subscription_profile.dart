@@ -58,9 +58,10 @@ class SubscriptionProfile {
 
   int get sortOrder {
     final value = configuration['sortOrder'] ??
+        configuration['sort_order'] ??
         configuration['sort'] ??
         configuration['order'];
-    return value is num ? value.toInt() : index;
+    return _parseOrder(value) ?? index;
   }
 
   String? get groupDescription {
@@ -72,11 +73,14 @@ class SubscriptionProfile {
         : null;
   }
 
-  int get groupSortOrder {
+  int? get groupSortOrder {
     final value = configuration['group'];
-    if (value is! Map) return 0;
-    final order = value['sort'] ?? value['sortOrder'] ?? value['order'];
-    return order is num ? order.toInt() : 0;
+    if (value is! Map) return null;
+    final order = value['sort'] ??
+        value['sortOrder'] ??
+        value['sort_order'] ??
+        value['order'];
+    return _parseOrder(order);
   }
 
   bool get groupIsDefault {
@@ -140,9 +144,16 @@ class SubscriptionProfile {
     runtimeConfiguration.remove('description');
     runtimeConfiguration.remove('subtitle');
     runtimeConfiguration.remove('sortOrder');
+    runtimeConfiguration.remove('sort_order');
     runtimeConfiguration.remove('sort');
     runtimeConfiguration.remove('order');
     runtimeConfiguration.remove('icon');
     return runtimeConfiguration;
   }
+}
+
+int? _parseOrder(dynamic value) {
+  if (value is num) return value.toInt();
+  if (value is String) return int.tryParse(value.trim());
+  return null;
 }
