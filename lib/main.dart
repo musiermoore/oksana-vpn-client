@@ -7,8 +7,9 @@ import 'package:flutter/services.dart';
 import 'app_theme.dart';
 import 'models/subscription_metadata.dart';
 import 'models/subscription_profile.dart';
-import 'screens/vpn_home_screen.dart';
 import 'screens/subscription_screen.dart';
+import 'screens/vpn_home_screen.dart';
+import 'services/app_settings_store.dart';
 import 'services/auth_api.dart';
 import 'services/auth_store.dart';
 import 'services/subscription_api.dart';
@@ -30,7 +31,9 @@ class _OksanaVpnAppState extends State<OksanaVpnApp> {
   final _messengerKey = GlobalKey<ScaffoldMessengerState>();
   final _authApi = AuthApi();
   final _authStore = const AuthStore();
+  final _settingsStore = const AppSettingsStore();
   final Set<String> _handledTickets = {};
+  ThemeMode _themeMode = ThemeMode.system;
   bool _ready = false;
   bool _authenticating = false;
 
@@ -38,10 +41,33 @@ class _OksanaVpnAppState extends State<OksanaVpnApp> {
   void initState() {
     super.initState();
     _deepLinkChannel.setMethodCallHandler(_handleNativeCall);
+    unawaited(_restoreThemeMode());
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _ready = true;
       unawaited(_deepLinkChannel.invokeMethod<void>('ready'));
     });
+  }
+
+  Future<void> _restoreThemeMode() async {
+    try {
+      final savedMode = await _settingsStore.readThemeMode();
+      if (savedMode != null && mounted) setState(() => _themeMode = savedMode);
+    } catch (_) {
+      // Keep the system theme if preferences are unavailable.
+    }
+  }
+
+  void _setThemeMode(ThemeMode mode) {
+    setState(() => _themeMode = mode);
+    unawaited(_saveThemeMode(mode));
+  }
+
+  Future<void> _saveThemeMode(ThemeMode mode) async {
+    try {
+      await _settingsStore.saveThemeMode(mode);
+    } catch (_) {
+      // Keep the selected theme for this session if storage is unavailable.
+    }
   }
 
   @override
@@ -109,6 +135,8 @@ class _OksanaVpnAppState extends State<OksanaVpnApp> {
           builder: (_) => VpnHomeScreen(
             profiles: profiles,
             accountName: profile.name,
+            themeMode: _themeMode,
+            onThemeModeChanged: _setThemeMode,
             authToken: token,
             primarySubscriptionError: primarySubscriptionError,
             primaryMetadata: primaryMetadata,
@@ -143,8 +171,11 @@ class _OksanaVpnAppState extends State<OksanaVpnApp> {
       scaffoldMessengerKey: _messengerKey,
       theme: AppTheme.light,
       darkTheme: AppTheme.dark,
-      themeMode: ThemeMode.system,
-      home: const SubscriptionScreen(),
+      themeMode: _themeMode,
+      home: SubscriptionScreen(
+        themeMode: _themeMode,
+        onThemeModeChanged: _setThemeMode,
+      ),
       builder: (context, child) => Stack(
         children: [
           if (child != null) child,

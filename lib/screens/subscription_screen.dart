@@ -12,7 +12,14 @@ import '../widgets/brand_header.dart';
 import 'vpn_home_screen.dart';
 
 class SubscriptionScreen extends StatefulWidget {
-  const SubscriptionScreen({super.key});
+  const SubscriptionScreen({
+    super.key,
+    required this.themeMode,
+    required this.onThemeModeChanged,
+  });
+
+  final ThemeMode themeMode;
+  final ValueChanged<ThemeMode> onThemeModeChanged;
 
   @override
   State<SubscriptionScreen> createState() => _SubscriptionScreenState();
@@ -131,10 +138,12 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
   void _openSubscriptionsWithoutLogin() {
     Navigator.of(context).pushReplacement<void, void>(
       MaterialPageRoute<void>(
-        builder: (_) => const VpnHomeScreen(
+        builder: (_) => VpnHomeScreen(
           profiles: [],
           accountName: '',
           initialTab: 0,
+          themeMode: widget.themeMode,
+          onThemeModeChanged: widget.onThemeModeChanged,
         ),
       ),
     );
@@ -161,6 +170,8 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
         builder: (_) => VpnHomeScreen(
           profiles: profiles,
           accountName: profile.name,
+          themeMode: widget.themeMode,
+          onThemeModeChanged: widget.onThemeModeChanged,
           authToken: token,
           primarySubscriptionError: primarySubscriptionError,
           primaryMetadata: primaryMetadata,

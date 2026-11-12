@@ -7,12 +7,14 @@ import 'package:flutter/services.dart';
 import '../app_theme.dart';
 import '../models/subscription_metadata.dart';
 import '../models/subscription_profile.dart';
+import '../services/app_settings_store.dart';
 import '../services/auth_api.dart';
 import '../services/auth_store.dart';
 import '../services/subscription_api.dart';
 import '../services/subscription_store.dart';
 import '../vpn/vpn_runtime.dart';
 import '../vpn/vpn_runtime_factory.dart';
+import 'settings_screen.dart';
 import 'subscription_screen.dart';
 
 final _connectivityTestUri =
@@ -23,6 +25,8 @@ class VpnHomeScreen extends StatefulWidget {
     super.key,
     required this.profiles,
     required this.accountName,
+    required this.themeMode,
+    required this.onThemeModeChanged,
     this.authToken,
     this.primarySubscriptionError,
     this.primaryMetadata = const SubscriptionMetadata(),
@@ -31,6 +35,8 @@ class VpnHomeScreen extends StatefulWidget {
 
   final List<SubscriptionProfile> profiles;
   final String accountName;
+  final ThemeMode themeMode;
+  final ValueChanged<ThemeMode> onThemeModeChanged;
   final String? authToken;
   final String? primarySubscriptionError;
   final SubscriptionMetadata primaryMetadata;
@@ -46,6 +52,7 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
   final _externalUrlController = TextEditingController();
   final _subscriptionApi = SubscriptionApi();
   final _subscriptionStore = const SubscriptionStore();
+  final _settingsStore = const AppSettingsStore();
   final _authApi = AuthApi();
   final _authStore = const AuthStore();
 
@@ -66,6 +73,7 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
   bool _refreshingSubscriptions = false;
   String? _activeSubscriptionKey = 'oksana';
   VpnMode _selectedMode = VpnMode.tun;
+  ThemeMode _selectedThemeMode = ThemeMode.system;
   late int _selectedTab = widget.initialTab;
   bool _switchingServer = false;
   List<String> _externalUrls = [];
@@ -94,6 +102,8 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
     super.initState();
     _primarySubscriptionError = widget.primarySubscriptionError;
     _primaryMetadata = widget.primaryMetadata;
+    _selectedThemeMode = widget.themeMode;
+    unawaited(_restoreVpnMode());
     if (_profiles.isNotEmpty) {
       _selectedProfile = _profiles.first;
       _scheduleSubscriptionUpdate('oksana', _primaryMetadata);
@@ -102,6 +112,20 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
     }
     unawaited(_restoreExternalSubscriptions());
     unawaited(_restoreFavoriteProfiles());
+  }
+
+  Future<void> _restoreVpnMode() async {
+    try {
+      final mode = await _settingsStore.readVpnMode();
+      final themeMode = await _settingsStore.readThemeMode();
+      if (!mounted) return;
+      setState(() {
+        if (mode != null && _runtime.supports(mode)) _selectedMode = mode;
+        if (themeMode != null) _selectedThemeMode = themeMode;
+      });
+    } catch (_) {
+      // Keep the default mode if preferences are unavailable.
+    }
   }
 
   Future<void> _restoreFavoriteProfiles() async {
@@ -626,7 +650,12 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
     await _authStore.clear();
     if (!mounted) return;
     Navigator.of(context).pushAndRemoveUntil<void>(
-      MaterialPageRoute<void>(builder: (_) => const SubscriptionScreen()),
+      MaterialPageRoute<void>(
+        builder: (_) => SubscriptionScreen(
+          themeMode: _selectedThemeMode,
+          onThemeModeChanged: widget.onThemeModeChanged,
+        ),
+      ),
       (_) => false,
     );
   }
@@ -671,6 +700,7 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
       return;
     }
     setState(() => _selectedMode = mode);
+    unawaited(_saveVpnMode(mode));
     final hint = mode == VpnMode.tun
         ? 'Весь системный трафик пойдёт через VPN. Может потребоваться разрешение на изменение сетевых настроек.'
         : 'VPN будет доступен приложениям через локальные SOCKS/HTTP порты.';
@@ -684,6 +714,34 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
           duration: const Duration(seconds: 4),
         ),
       );
+  }
+
+  Future<void> _saveVpnMode(VpnMode mode) async {
+    try {
+      await _settingsStore.saveVpnMode(mode);
+    } catch (_) {
+      // Keep the selected mode for this session if storage is unavailable.
+    }
+  }
+
+  void _changeThemeMode(ThemeMode mode) {
+    setState(() => _selectedThemeMode = mode);
+    widget.onThemeModeChanged(mode);
+  }
+
+  void _openSettings({required bool vpnModeEnabled}) {
+    Navigator.of(context).push<void>(
+      MaterialPageRoute<void>(
+        builder: (_) => SettingsScreen(
+          vpnMode: _selectedMode,
+          onVpnModeChanged: _changeMode,
+          vpnModeEnabled: vpnModeEnabled,
+          themeMode: _selectedThemeMode,
+          onThemeModeChanged: _changeThemeMode,
+          supportsTun: _runtime.supports(VpnMode.tun),
+        ),
+      ),
+    );
   }
 
   @override
@@ -756,7 +814,7 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
     final canConnect = _runtime.supports(_selectedMode);
     final subscriptions = _subscriptionSets();
     return SingleChildScrollView(
-      padding: const EdgeInsets.fromLTRB(10, 0, 10, 28),
+      padding: const EdgeInsets.fromLTRB(10, 8, 10, 28),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -779,8 +837,11 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
                         ?.copyWith(fontWeight: FontWeight.w800)),
               ),
               IconButton(
-                tooltip: 'Профиль и настройки',
-                onPressed: () => setState(() => _selectedTab = 2),
+                tooltip: 'Настройки',
+                onPressed: () => _openSettings(
+                  vpnModeEnabled: state.phase == VpnRuntimePhase.disconnected ||
+                      state.phase == VpnRuntimePhase.error,
+                ),
                 icon: const Icon(Icons.settings_outlined),
               ),
             ],
@@ -790,33 +851,7 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
             padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
             child: Column(
               children: [
-                Center(
-                  child: SizedBox(
-                    width: 260,
-                    child: SegmentedButton<VpnMode>(
-                      showSelectedIcon: false,
-                      style: const ButtonStyle(
-                        visualDensity: VisualDensity.compact,
-                      ),
-                      segments: [
-                        const ButtonSegment(
-                          value: VpnMode.proxy,
-                          label: Text('Proxy'),
-                        ),
-                        ButtonSegment(
-                          value: VpnMode.tun,
-                          label: const Text('TUN'),
-                          enabled: _runtime.supports(VpnMode.tun),
-                        ),
-                      ],
-                      selected: {_selectedMode},
-                      onSelectionChanged: isRunning || isBusy
-                          ? null
-                          : (selection) => _changeMode(selection.first),
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 20),
+                const SizedBox(height: 8),
                 _PowerControl(
                   phase: state.phase,
                   enabled: !isBusy &&
@@ -1614,7 +1649,10 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
                         ? () =>
                             Navigator.of(context).pushReplacement<void, void>(
                               MaterialPageRoute<void>(
-                                builder: (_) => const SubscriptionScreen(),
+                                builder: (_) => SubscriptionScreen(
+                                  themeMode: _selectedThemeMode,
+                                  onThemeModeChanged: widget.onThemeModeChanged,
+                                ),
                               ),
                             )
                         : null,
