@@ -6,11 +6,11 @@ abstract final class AppTheme {
 
   static final light = _buildTheme(
     brightness: Brightness.light,
-    background: const Color(0xFFF6F7FB),
+    background: const Color(0xFFF7F6FC),
     surface: Colors.white,
     text: const Color(0xFF121826),
     secondaryText: const Color(0xFF667085),
-    border: const Color(0xFFE7EAF0),
+    border: const Color(0xFFE9E7F1),
   );
 
   static final dark = _buildTheme(
@@ -34,7 +34,8 @@ abstract final class AppTheme {
       seedColor: primary,
       brightness: brightness,
     ).copyWith(
-      primary: brightness == Brightness.dark ? const Color(0xFF7C62FF) : primary,
+      primary:
+          brightness == Brightness.dark ? const Color(0xFF7C62FF) : primary,
       surface: surface,
       onSurface: text,
       outline: border,
@@ -53,7 +54,8 @@ abstract final class AppTheme {
         filled: true,
         fillColor: surface,
         hintStyle: TextStyle(color: secondaryText.withValues(alpha: 0.8)),
-        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 17),
+        contentPadding:
+            const EdgeInsets.symmetric(horizontal: 16, vertical: 17),
         border: OutlineInputBorder(
           borderRadius: BorderRadius.circular(14),
           borderSide: BorderSide(color: border),
@@ -73,7 +75,8 @@ abstract final class AppTheme {
           backgroundColor: primary,
           foregroundColor: Colors.white,
           disabledBackgroundColor: primary.withValues(alpha: 0.4),
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+          shape:
+              RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
           textStyle: const TextStyle(fontWeight: FontWeight.w700, fontSize: 15),
         ),
       ),
@@ -81,7 +84,7 @@ abstract final class AppTheme {
         color: surface,
         elevation: 0,
         shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(16),
+          borderRadius: BorderRadius.circular(18),
           side: BorderSide(color: border),
         ),
       ),

@@ -8,7 +8,7 @@ import 'vpn_runtime.dart';
 
 const _xrayExecutableOverride = String.fromEnvironment('XRAY_EXECUTABLE');
 
-class MacosProxyRuntime implements VpnRuntime {
+class MacosProxyRuntime implements VpnRuntime, VpnConnectivityProbe {
   final StreamController<VpnRuntimeSnapshot> _stateChanges =
       StreamController<VpnRuntimeSnapshot>.broadcast();
   Process? _process;
@@ -16,6 +16,7 @@ class MacosProxyRuntime implements VpnRuntime {
   VpnRuntimePhase _phase = VpnRuntimePhase.disconnected;
   String? _errorMessage;
   List<int> _localProxyPorts = const [];
+  int? _probeHttpPort;
   bool _disposed = false;
 
   @override
@@ -126,6 +127,48 @@ class MacosProxyRuntime implements VpnRuntime {
   }
 
   @override
+  Future<int> probeConnectivity(
+    SubscriptionProfile profile,
+    Uri testUri,
+  ) async {
+    if (!supports(VpnMode.proxy)) return -1;
+
+    final reservation =
+        await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+    final port = reservation.port;
+    await reservation.close();
+    _probeHttpPort = port;
+
+    final client = HttpClient()
+      ..connectionTimeout = const Duration(seconds: 5)
+      ..idleTimeout = const Duration(seconds: 2)
+      ..findProxy = (_) => 'PROXY 127.0.0.1:$port';
+
+    try {
+      await connect(profile, VpnMode.proxy);
+      final stopwatch = Stopwatch()..start();
+      final request =
+          await client.getUrl(testUri).timeout(const Duration(seconds: 10));
+      request.headers
+          .set(HttpHeaders.userAgentHeader, 'OksanaVPN-Connectivity');
+      final response =
+          await request.close().timeout(const Duration(seconds: 10));
+      await response.drain<void>().timeout(const Duration(seconds: 5));
+      stopwatch.stop();
+      return response.statusCode >= HttpStatus.ok &&
+              response.statusCode < HttpStatus.badRequest
+          ? stopwatch.elapsedMilliseconds
+          : -1;
+    } catch (_) {
+      return -1;
+    } finally {
+      client.close(force: true);
+      _probeHttpPort = null;
+      await disconnect();
+    }
+  }
+
+  @override
   Future<void> disconnect() async {
     final process = _process;
     if (process == null) {
@@ -186,6 +229,27 @@ class MacosProxyRuntime implements VpnRuntime {
     final inbounds = configuration['inbounds'] is List
         ? List<dynamic>.from(configuration['inbounds'] as List)
         : <dynamic>[];
+    final probePort = _probeHttpPort;
+    if (probePort != null) {
+      final sourceInbound = inbounds.whereType<Map>().firstWhere(
+            (item) => item['protocol'] == 'socks' || item['protocol'] == 'http',
+            orElse: () => const {},
+          );
+      final sourceTag = sourceInbound['tag'];
+      configuration['inbounds'] = [
+        {
+          'tag': sourceTag is String && sourceTag.isNotEmpty
+              ? sourceTag
+              : 'local-socks',
+          'listen': '127.0.0.1',
+          'port': probePort,
+          'protocol': 'http',
+          'settings': <String, dynamic>{},
+        }
+      ];
+      return configuration;
+    }
+
     final hasLocalProxy = inbounds.any((item) {
       if (item is! Map) return false;
       return item['protocol'] == 'socks' || item['protocol'] == 'http';

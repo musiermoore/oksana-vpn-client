@@ -9,6 +9,11 @@ class MainFlutterWindow: NSWindow {
     self.setFrame(windowFrame, display: true)
 
     RegisterGeneratedPlugins(registry: flutterViewController)
+    let deepLinkChannel = FlutterMethodChannel(
+      name: "oksanavpn/deep_links",
+      binaryMessenger: flutterViewController.engine.binaryMessenger
+    )
+    (NSApplication.shared.delegate as? AppDelegate)?.registerDeepLinkChannel(deepLinkChannel)
 
     super.awakeFromNib()
 

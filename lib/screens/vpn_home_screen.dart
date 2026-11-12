@@ -1,61 +1,381 @@
 import 'dart:async';
 
-import 'package:characters/characters.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show OverflowBoxFit;
+import 'package:flutter/services.dart';
 
 import '../app_theme.dart';
+import '../models/subscription_metadata.dart';
 import '../models/subscription_profile.dart';
+import '../services/auth_api.dart';
+import '../services/auth_store.dart';
 import '../services/subscription_api.dart';
 import '../services/subscription_store.dart';
 import '../vpn/vpn_runtime.dart';
 import '../vpn/vpn_runtime_factory.dart';
+import 'subscription_screen.dart';
+
+final _connectivityTestUri =
+    Uri.https('connectivitycheck.gstatic.com', '/generate_204');
 
 class VpnHomeScreen extends StatefulWidget {
   const VpnHomeScreen({
     super.key,
     required this.profiles,
-    required this.subscriptionUuid,
+    required this.accountName,
+    this.authToken,
+    this.primarySubscriptionError,
+    this.primaryMetadata = const SubscriptionMetadata(),
+    this.initialTab = 0,
   });
 
   final List<SubscriptionProfile> profiles;
-  final String subscriptionUuid;
+  final String accountName;
+  final String? authToken;
+  final String? primarySubscriptionError;
+  final SubscriptionMetadata primaryMetadata;
+  final int initialTab;
 
   @override
   State<VpnHomeScreen> createState() => _VpnHomeScreenState();
 }
 
 class _VpnHomeScreenState extends State<VpnHomeScreen> {
+  static const _deepLinkChannel = MethodChannel('oksanavpn/deep_links');
   late final VpnRuntime _runtime = createVpnRuntime();
-  late final TextEditingController _uuidController =
-      TextEditingController(text: widget.subscriptionUuid);
+  final _externalUrlController = TextEditingController();
   final _subscriptionApi = SubscriptionApi();
   final _subscriptionStore = const SubscriptionStore();
+  final _authApi = AuthApi();
+  final _authStore = const AuthStore();
 
+  late final List<SubscriptionProfile> _primaryProfiles =
+      List.of(widget.profiles);
+  SubscriptionMetadata _primaryMetadata = const SubscriptionMetadata();
   late List<SubscriptionProfile> _profiles = List.of(widget.profiles);
-  late SubscriptionProfile _selectedProfile = _profiles.first;
+  final Map<String, List<SubscriptionProfile>> _externalProfilesByUrl = {};
+  final Map<String, SubscriptionMetadata> _externalMetadataByUrl = {};
+  final Map<String, Timer> _subscriptionTimers = {};
+  SubscriptionProfile? _selectedProfile;
+  final Map<SubscriptionProfile, int> _pingResults = {};
+  final Set<SubscriptionProfile> _pingingProfiles = {};
+  final Map<String, Set<String>> _favoriteProfilesBySubscription = {};
+  bool _pingingAll = false;
+  bool _savingFavorites = false;
+  bool _favoritesExpanded = true;
+  bool _refreshingSubscriptions = false;
+  String? _activeSubscriptionKey = 'oksana';
   VpnMode _selectedMode = VpnMode.tun;
-  int _selectedTab = 0;
+  late int _selectedTab = widget.initialTab;
   bool _switchingServer = false;
-  bool _updatingSubscription = false;
-  bool _showUuid = false;
-  bool _serversExpanded = true;
+  List<String> _externalUrls = [];
+  bool _loadingExternal = false;
+  String? _externalError;
+  String? _primarySubscriptionError;
   final Map<String, bool> _expandedServerGroups = {};
   String? _subscriptionError;
+
+  bool get _pinging => _pingingProfiles.isNotEmpty;
 
   @override
   void dispose() {
     _runtime.dispose();
+    for (final timer in _subscriptionTimers.values) {
+      timer.cancel();
+    }
     _subscriptionApi.close();
-    _uuidController.dispose();
+    _authApi.close();
+    _externalUrlController.dispose();
     super.dispose();
   }
 
+  @override
+  void initState() {
+    super.initState();
+    _primarySubscriptionError = widget.primarySubscriptionError;
+    _primaryMetadata = widget.primaryMetadata;
+    if (_profiles.isNotEmpty) {
+      _selectedProfile = _profiles.first;
+      _scheduleSubscriptionUpdate('oksana', _primaryMetadata);
+    } else {
+      _activeSubscriptionKey = null;
+    }
+    unawaited(_restoreExternalSubscriptions());
+    unawaited(_restoreFavoriteProfiles());
+  }
+
+  Future<void> _restoreFavoriteProfiles() async {
+    try {
+      final favorites = await _subscriptionStore.readFavoriteProfiles();
+      if (!mounted) return;
+      setState(() {
+        for (final entry in favorites.entries) {
+          final existing =
+              _favoriteProfilesBySubscription.putIfAbsent(entry.key, () => {});
+          existing.addAll(entry.value);
+        }
+      });
+    } catch (_) {
+      // Favorites remain available for the current session if storage fails.
+    }
+  }
+
+  bool _isFavorite(SubscriptionProfile profile) {
+    final subscriptionKey = _activeSubscriptionKey;
+    if (subscriptionKey == null) return false;
+    return _favoriteProfilesBySubscription[subscriptionKey]
+            ?.contains(profile.favoriteKey) ??
+        false;
+  }
+
+  Future<void> _toggleFavorite(SubscriptionProfile profile) async {
+    final subscriptionKey = _activeSubscriptionKey;
+    if (subscriptionKey == null || _savingFavorites) return;
+
+    final previous = Set<String>.of(
+      _favoriteProfilesBySubscription[subscriptionKey] ?? const {},
+    );
+    final updated = Set<String>.of(previous);
+    if (!updated.add(profile.favoriteKey)) {
+      updated.remove(profile.favoriteKey);
+    }
+
+    setState(() {
+      _favoriteProfilesBySubscription[subscriptionKey] = updated;
+      _savingFavorites = true;
+    });
+    try {
+      await _subscriptionStore.saveFavoriteProfiles(
+        _favoriteProfilesBySubscription.map(
+          (key, value) => MapEntry(key, Set<String>.of(value)),
+        ),
+      );
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          if (previous.isEmpty) {
+            _favoriteProfilesBySubscription.remove(subscriptionKey);
+          } else {
+            _favoriteProfilesBySubscription[subscriptionKey] = previous;
+          }
+        });
+        _showMessage('Не удалось сохранить избранное.');
+      }
+    } finally {
+      if (mounted) setState(() => _savingFavorites = false);
+    }
+  }
+
+  Future<void> _restoreExternalSubscriptions() async {
+    try {
+      final urls = await _subscriptionStore.readExternalSubscriptions();
+      if (!mounted || urls.isEmpty) return;
+      await _refreshAllExternal(urls);
+    } catch (_) {
+      if (mounted) {
+        setState(() =>
+            _externalError = 'Не удалось прочитать список сторонних подписок.');
+      }
+    }
+  }
+
+  Map<String, List<SubscriptionProfile>> _subscriptionSets() {
+    final sets = <String, List<SubscriptionProfile>>{};
+    if (_primaryProfiles.isNotEmpty) sets['oksana'] = _primaryProfiles;
+    for (final url in _externalUrls) {
+      final profiles = _externalProfilesByUrl[url];
+      if (profiles != null && profiles.isNotEmpty) {
+        sets['external:$url'] = profiles;
+      }
+    }
+    return sets;
+  }
+
+  SubscriptionMetadata _metadataFor(String? key) {
+    if (key == 'oksana') return _primaryMetadata;
+    if (key != null && key.startsWith('external:')) {
+      return _externalMetadataByUrl[key.substring('external:'.length)] ??
+          const SubscriptionMetadata();
+    }
+    return const SubscriptionMetadata();
+  }
+
+  String _subscriptionName(String key) {
+    final title = _metadataFor(key).title;
+    if (title != null && title.isNotEmpty) return title;
+    if (key == 'oksana') return 'Oksana VPN';
+    final index = _externalUrls.indexOf(key.substring('external:'.length));
+    return index < 0 ? 'Сторонняя подписка' : 'Сторонняя подписка ${index + 1}';
+  }
+
+  void _selectAvailableSubscription({bool selectPrimaryFirst = false}) {
+    final previousKey = _activeSubscriptionKey;
+    final previousProfile = _selectedProfile;
+    final sets = _subscriptionSets();
+    if (sets.isEmpty) {
+      _activeSubscriptionKey = null;
+      _profiles = [];
+      _selectedProfile = null;
+      return;
+    }
+    final preferredKey = selectPrimaryFirst && sets.containsKey('oksana')
+        ? 'oksana'
+        : sets.containsKey(_activeSubscriptionKey)
+            ? _activeSubscriptionKey!
+            : sets.keys.first;
+    _activeSubscriptionKey = preferredKey;
+    _profiles = sets[preferredKey]!;
+    if (!_profiles.contains(previousProfile)) {
+      final previousId = previousProfile?.stableId;
+      final preserved = previousKey == preferredKey && previousId != null
+          ? _profiles.where((profile) => profile.stableId == previousId)
+          : const <SubscriptionProfile>[];
+      _selectedProfile = preserved.isNotEmpty
+          ? preserved.first
+          : _profiles.isEmpty
+              ? null
+              : _profiles.first;
+    }
+  }
+
+  Future<Map<String, SubscriptionLoadResult>> _fetchExternal(
+      List<String> urls) async {
+    final profilesByUrl = <String, SubscriptionLoadResult>{};
+    for (var i = 0; i < urls.length; i++) {
+      try {
+        profilesByUrl[urls[i]] =
+            await _subscriptionApi.fetchExternalProfiles(urls[i]);
+      } on SubscriptionApiException catch (error) {
+        _externalError = error.message;
+      }
+    }
+    return profilesByUrl;
+  }
+
+  Future<void> _refreshAllExternal(List<String> urls) async {
+    setState(() {
+      _loadingExternal = true;
+      _externalError = null;
+    });
+    final externalProfiles = await _fetchExternal(urls);
+    if (!mounted) return;
+    setState(() {
+      _externalUrls = List.of(urls);
+      _mergeExternalResults(externalProfiles);
+      _scheduleExternalUpdates(externalProfiles);
+      _selectAvailableSubscription();
+      _loadingExternal = false;
+    });
+  }
+
+  void _mergeExternalResults(
+    Map<String, SubscriptionLoadResult> sources,
+  ) {
+    _externalProfilesByUrl
+        .removeWhere((url, _) => !_externalUrls.contains(url));
+    _externalMetadataByUrl
+        .removeWhere((url, _) => !_externalUrls.contains(url));
+    for (final entry in sources.entries) {
+      _externalProfilesByUrl[entry.key] = entry.value.profiles;
+      _externalMetadataByUrl[entry.key] = entry.value.metadata;
+    }
+  }
+
+  void _scheduleExternalUpdates(
+    Map<String, SubscriptionLoadResult> sources,
+  ) {
+    final activeUrls = sources.keys.toSet();
+    for (final url in _externalUrls) {
+      final key = 'external:$url';
+      final metadata = sources[url]?.metadata ?? _externalMetadataByUrl[url];
+      if (!activeUrls.contains(url) && metadata == null) {
+        _subscriptionTimers.remove(key)?.cancel();
+        continue;
+      }
+      _scheduleSubscriptionUpdate(key, metadata!);
+    }
+  }
+
+  void _scheduleSubscriptionUpdate(
+    String key,
+    SubscriptionMetadata metadata, {
+    Duration? delay,
+  }) {
+    _subscriptionTimers.remove(key)?.cancel();
+    final interval = delay ?? metadata.refreshInterval;
+    if (interval == null) return;
+    _subscriptionTimers[key] = Timer(
+      interval,
+      () => unawaited(_autoRefreshSubscription(key)),
+    );
+  }
+
+  Future<void> _autoRefreshSubscription(String key) async {
+    if (!mounted) return;
+    if (_runtime.snapshot.phase != VpnRuntimePhase.disconnected ||
+        _refreshingSubscriptions ||
+        _loadingExternal) {
+      _scheduleSubscriptionUpdate(
+        key,
+        _metadataFor(key),
+        delay: const Duration(minutes: 5),
+      );
+      return;
+    }
+
+    try {
+      if (key == 'oksana') {
+        final token = widget.authToken;
+        if (token == null) return;
+        final account = await _authApi.fetchProfile(token);
+        final loaded = await _subscriptionApi.fetchProfiles(account.uuid);
+        if (!mounted) return;
+        setState(() {
+          _primaryProfiles
+            ..clear()
+            ..addAll(loaded.profiles);
+          _primaryMetadata = loaded.metadata;
+          _primarySubscriptionError = null;
+          _selectAvailableSubscription();
+          _pingResults.clear();
+        });
+        _scheduleSubscriptionUpdate(key, loaded.metadata);
+        return;
+      }
+
+      final url = key.substring('external:'.length);
+      if (!_externalUrls.contains(url)) return;
+      final loaded = await _subscriptionApi.fetchExternalProfiles(url);
+      if (!mounted || !_externalUrls.contains(url)) return;
+      setState(() {
+        _externalProfilesByUrl[url] = loaded.profiles;
+        _externalMetadataByUrl[url] = loaded.metadata;
+        if (_activeSubscriptionKey == key) _selectAvailableSubscription();
+        _pingResults.clear();
+      });
+      _scheduleSubscriptionUpdate(key, loaded.metadata);
+    } on AuthApiException catch (error) {
+      if (mounted) setState(() => _subscriptionError = error.message);
+      _scheduleSubscriptionUpdate(key, _metadataFor(key));
+    } on SubscriptionApiException catch (error) {
+      if (mounted) setState(() => _subscriptionError = error.message);
+      _scheduleSubscriptionUpdate(key, _metadataFor(key));
+    } catch (_) {
+      _scheduleSubscriptionUpdate(key, _metadataFor(key));
+    }
+  }
+
   Future<void> _toggleConnection() async {
+    final selectedProfile = _selectedProfile;
+    if (selectedProfile == null) {
+      _showMessage('Добавьте подписку, чтобы выбрать сервер.');
+      return;
+    }
     try {
       if (_runtime.snapshot.phase == VpnRuntimePhase.running) {
         await _runtime.disconnect();
       } else {
-        await _runtime.connect(_selectedProfile, _selectedMode);
+        await _runtime.connect(selectedProfile, _selectedMode);
       }
     } on VpnRuntimeException catch (error) {
       _showMessage(error.message);
@@ -96,40 +416,219 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
     }
   }
 
-  Future<void> _updateSubscription() async {
-    if (_updatingSubscription ||
+  Future<void> _selectSubscription(String key) async {
+    final nextProfiles = _subscriptionSets()[key];
+    final phase = _runtime.snapshot.phase;
+    if (nextProfiles == null ||
+        nextProfiles.isEmpty ||
+        key == _activeSubscriptionKey ||
+        _switchingServer ||
+        phase == VpnRuntimePhase.starting ||
+        phase == VpnRuntimePhase.stopping) {
+      return;
+    }
+
+    final wasRunning = phase == VpnRuntimePhase.running;
+    setState(() => _switchingServer = wasRunning);
+    try {
+      if (wasRunning || phase == VpnRuntimePhase.error) {
+        await _runtime.disconnect();
+        if (_runtime.snapshot.phase == VpnRuntimePhase.error) {
+          throw VpnRuntimeException(
+            _runtime.snapshot.errorMessage ?? 'Не удалось отключить VPN.',
+          );
+        }
+      }
+      final profile = nextProfiles.first;
+      setState(() {
+        _activeSubscriptionKey = key;
+        _profiles = nextProfiles;
+        _selectedProfile = profile;
+        _pingResults.clear();
+      });
+      if (wasRunning) await _runtime.connect(profile, _selectedMode);
+    } on VpnRuntimeException catch (error) {
+      _showMessage(error.message);
+    } finally {
+      if (mounted) setState(() => _switchingServer = false);
+    }
+  }
+
+  Future<void> _pingProfile(SubscriptionProfile profile) async {
+    if (!_pingingProfiles.add(profile)) return;
+    setState(() {});
+    final result = await _measureProfile(profile);
+    if (mounted) {
+      setState(() {
+        _pingResults[profile] = result;
+        _pingingProfiles.remove(profile);
+      });
+    } else {
+      _pingingProfiles.remove(profile);
+    }
+  }
+
+  Future<int> _measureProfile(SubscriptionProfile profile) async {
+    final runtime = _runtime;
+    if (runtime is! VpnConnectivityProbe) return -1;
+    try {
+      return await (runtime as VpnConnectivityProbe)
+          .probeConnectivity(profile, _connectivityTestUri);
+    } catch (_) {
+      return -1;
+    }
+  }
+
+  Future<void> _pingAllProfiles() async {
+    if (_pingingAll || _profiles.isEmpty || _pingingProfiles.isNotEmpty) return;
+    final profiles = List<SubscriptionProfile>.of(_profiles);
+    setState(() {
+      _pingingAll = true;
+      _pingingProfiles.addAll(profiles);
+      for (final profile in profiles) {
+        _pingResults.remove(profile);
+      }
+    });
+
+    var nextIndex = 0;
+    Future<void> worker() async {
+      while (nextIndex < profiles.length) {
+        final profile = profiles[nextIndex++];
+        final result = await _measureProfile(profile);
+        if (!mounted) return;
+        setState(() => _pingResults[profile] = result);
+      }
+    }
+
+    final workerCount = profiles.length < 3 ? profiles.length : 3;
+    await Future.wait(List.generate(workerCount, (_) => worker()));
+    if (mounted) {
+      setState(() {
+        _pingingProfiles.removeAll(profiles);
+        _pingingAll = false;
+      });
+    } else {
+      _pingingProfiles.removeAll(profiles);
+    }
+  }
+
+  Future<void> _updateSubscriptions() async {
+    final authToken = widget.authToken;
+    if (_refreshingSubscriptions ||
         _runtime.snapshot.phase != VpnRuntimePhase.disconnected) {
       return;
     }
 
     FocusScope.of(context).unfocus();
     setState(() {
-      _updatingSubscription = true;
+      _refreshingSubscriptions = true;
+      _loadingExternal = true;
       _subscriptionError = null;
+      _externalError = null;
     });
 
-    try {
-      final uuid = _uuidController.text.trim();
-      final profiles = await _subscriptionApi.fetchProfiles(uuid);
-      String? storageWarning;
+    List<SubscriptionProfile>? refreshedPrimary;
+    SubscriptionMetadata? refreshedPrimaryMetadata;
+    String? primaryError;
+    if (authToken != null) {
       try {
-        await _subscriptionStore.saveUuid(uuid);
-      } catch (_) {
-        storageWarning = 'Код не удалось сохранить на устройстве.';
+        final account = await _authApi.fetchProfile(authToken);
+        final loaded = await _subscriptionApi.fetchProfiles(account.uuid);
+        refreshedPrimary = loaded.profiles;
+        refreshedPrimaryMetadata = loaded.metadata;
+      } on AuthApiException catch (error) {
+        primaryError = error.message;
+      } on SubscriptionApiException catch (error) {
+        primaryError = error.message;
       }
-      if (!mounted) return;
-
-      setState(() {
-        _profiles = profiles;
-        _selectedProfile = profiles.first;
-      });
-      if (storageWarning != null) _showMessage(storageWarning);
-      setState(() => _selectedTab = 0);
-    } on SubscriptionApiException catch (error) {
-      if (mounted) setState(() => _subscriptionError = error.message);
-    } finally {
-      if (mounted) setState(() => _updatingSubscription = false);
     }
+
+    final refreshedExternal = await _fetchExternal(_externalUrls);
+    if (!mounted) return;
+
+    setState(() {
+      if (refreshedPrimary != null) {
+        _primaryProfiles
+          ..clear()
+          ..addAll(refreshedPrimary);
+        _primaryMetadata = refreshedPrimaryMetadata!;
+        _primarySubscriptionError = null;
+        _scheduleSubscriptionUpdate('oksana', refreshedPrimaryMetadata);
+      } else if (authToken != null) {
+        _primarySubscriptionError = primaryError;
+      }
+      _mergeExternalResults(refreshedExternal);
+      _scheduleExternalUpdates(refreshedExternal);
+      _pingResults.clear();
+      _selectAvailableSubscription(selectPrimaryFirst: true);
+      _loadingExternal = false;
+      _refreshingSubscriptions = false;
+      if (primaryError != null) _subscriptionError = primaryError;
+      if (_externalError != null) _subscriptionError ??= _externalError;
+    });
+  }
+
+  Future<void> _addExternalSubscription() async {
+    final url = _externalUrlController.text.trim();
+    if (url.isEmpty || _externalUrls.contains(url)) return;
+    final urls = [..._externalUrls, url];
+    setState(() {
+      _loadingExternal = true;
+      _externalError = null;
+    });
+    try {
+      final loaded = await _subscriptionApi.fetchExternalProfiles(url);
+      await _subscriptionStore.saveExternalSubscriptions(urls);
+      if (!mounted) return;
+      _externalUrlController.clear();
+      setState(() {
+        _externalUrls = urls;
+        _externalProfilesByUrl[url] = loaded.profiles;
+        _externalMetadataByUrl[url] = loaded.metadata;
+        _scheduleSubscriptionUpdate('external:$url', loaded.metadata);
+        _pingResults.clear();
+        if (_activeSubscriptionKey == null || _primaryProfiles.isEmpty) {
+          _activeSubscriptionKey = 'external:$url';
+        }
+        _selectAvailableSubscription();
+        _loadingExternal = false;
+      });
+    } on SubscriptionApiException catch (error) {
+      if (mounted) {
+        setState(() {
+          _externalError = error.message;
+          _loadingExternal = false;
+        });
+      }
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          _externalError = 'Не удалось сохранить ссылку подписки.';
+          _loadingExternal = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _removeExternalSubscription(String url) async {
+    final urls = _externalUrls.where((value) => value != url).toList();
+    await _subscriptionStore.saveExternalSubscriptions(urls);
+    await _refreshAllExternal(urls);
+  }
+
+  Future<void> _logout() async {
+    final authToken = widget.authToken;
+    if (authToken == null) return;
+    if (_runtime.snapshot.phase != VpnRuntimePhase.disconnected) {
+      await _runtime.disconnect();
+    }
+    await _authApi.logout(authToken);
+    await _authStore.clear();
+    if (!mounted) return;
+    Navigator.of(context).pushAndRemoveUntil<void>(
+      MaterialPageRoute<void>(builder: (_) => const SubscriptionScreen()),
+      (_) => false,
+    );
   }
 
   void _showMessage(String message) {
@@ -137,6 +636,26 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
       ..showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  Future<void> _openExternalLink(String rawUrl) async {
+    final uri = Uri.tryParse(rawUrl);
+    if (uri == null ||
+        !{'https', 'http'}.contains(uri.scheme.toLowerCase()) ||
+        uri.host.isEmpty ||
+        uri.userInfo.isNotEmpty) {
+      _showMessage('Ссылка подписки некорректна.');
+      return;
+    }
+    try {
+      final opened = await _deepLinkChannel.invokeMethod<bool>(
+        'openExternalUrl',
+        uri.toString(),
+      );
+      if (opened != true) _showMessage('Не удалось открыть ссылку.');
+    } on PlatformException {
+      _showMessage('Не удалось открыть ссылку.');
+    }
   }
 
   void _changeMode(VpnMode mode) {
@@ -179,34 +698,42 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
             phase == VpnRuntimePhase.stopping;
         final isRunning = phase == VpnRuntimePhase.running;
 
+        final canUpdate = phase == VpnRuntimePhase.disconnected &&
+            !_switchingServer &&
+            !_refreshingSubscriptions;
         return Scaffold(
           body: SafeArea(
-            child: Center(
+            child: Align(
+              alignment: Alignment.topCenter,
               child: ConstrainedBox(
                 constraints: const BoxConstraints(maxWidth: 680),
-                child: _selectedTab == 0
-                    ? _buildConnectionView(
-                        state: state,
-                        isBusy: isBusy,
-                        isRunning: isRunning,
-                      )
-                    : _buildProfileView(
-                        canUpdate: phase == VpnRuntimePhase.disconnected &&
-                            !_switchingServer,
-                      ),
+                child: switch (_selectedTab) {
+                  0 => _buildConnectionView(
+                      state: state,
+                      isBusy: isBusy,
+                      isRunning: isRunning,
+                    ),
+                  1 => _buildSubscriptionsView(canUpdate: canUpdate),
+                  _ => _buildProfileView(canUpdate: canUpdate),
+                },
               ),
             ),
           ),
           bottomNavigationBar: NavigationBar(
-            height: 64,
+            height: 68,
             selectedIndex: _selectedTab,
             onDestinationSelected: (index) =>
                 setState(() => _selectedTab = index),
             destinations: const [
               NavigationDestination(
-                icon: Icon(Icons.power_settings_new_rounded),
-                selectedIcon: Icon(Icons.power_settings_new_rounded),
-                label: 'Подключение',
+                icon: Icon(Icons.home_outlined),
+                selectedIcon: Icon(Icons.home_rounded),
+                label: 'Главная',
+              ),
+              NavigationDestination(
+                icon: Icon(Icons.credit_card_outlined),
+                selectedIcon: Icon(Icons.credit_card_rounded),
+                label: 'Подписки',
               ),
               NavigationDestination(
                 icon: Icon(Icons.person_outline_rounded),
@@ -227,162 +754,113 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
   }) {
     final theme = Theme.of(context);
     final canConnect = _runtime.supports(_selectedMode);
-    final profilesByGroup = <String, List<SubscriptionProfile>>{};
-    for (final profile in _profiles) {
-      profilesByGroup.putIfAbsent(profile.groupKey, () => []).add(profile);
-    }
-    final ungroupedProfiles = profilesByGroup.remove('ungrouped');
-
+    final subscriptions = _subscriptionSets();
     return SingleChildScrollView(
-      padding: const EdgeInsets.fromLTRB(24, 10, 24, 28),
+      padding: const EdgeInsets.fromLTRB(10, 0, 10, 28),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Center(
-            child: SizedBox(
-              width: 260,
-              child: SegmentedButton<VpnMode>(
-                showSelectedIcon: false,
-                style: const ButtonStyle(
-                  visualDensity: VisualDensity.compact,
+          Row(
+            children: [
+              Container(
+                width: 34,
+                height: 34,
+                decoration: BoxDecoration(
+                  color: theme.colorScheme.primary.withValues(alpha: .1),
+                  borderRadius: BorderRadius.circular(11),
                 ),
-                segments: [
-                  const ButtonSegment(
-                    value: VpnMode.proxy,
-                    label: Text('Proxy'),
-                  ),
-                  ButtonSegment(
-                    value: VpnMode.tun,
-                    label: const Text('TUN'),
-                    enabled: _runtime.supports(VpnMode.tun),
-                  ),
-                ],
-                selected: {_selectedMode},
-                onSelectionChanged: isRunning || isBusy
-                    ? null
-                    : (selection) => _changeMode(selection.first),
+                child: Icon(Icons.shield_rounded,
+                    color: theme.colorScheme.primary, size: 20),
               ),
-            ),
-          ),
-          const SizedBox(height: 16),
-          Align(
-            alignment: Alignment.center,
-            child: _PowerControl(
-              phase: state.phase,
-              enabled: !isBusy && !_switchingServer && canConnect,
-              onPressed: _toggleConnection,
-            ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text('Oksana VPN',
+                    style: theme.textTheme.titleMedium
+                        ?.copyWith(fontWeight: FontWeight.w800)),
+              ),
+              IconButton(
+                tooltip: 'Профиль и настройки',
+                onPressed: () => setState(() => _selectedTab = 2),
+                icon: const Icon(Icons.settings_outlined),
+              ),
+            ],
           ),
           const SizedBox(height: 8),
-          Text(
-            _connectionStatus(state),
-            textAlign: TextAlign.center,
-            style: theme.textTheme.bodyMedium?.copyWith(
-              color: state.phase == VpnRuntimePhase.error
-                  ? theme.colorScheme.error
-                  : theme.colorScheme.onSurfaceVariant,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-          const SizedBox(height: 26),
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(12, 4, 12, 10),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 6),
-                    child: Material(
-                      color: Colors.transparent,
-                      borderRadius: BorderRadius.circular(12),
-                      child: InkWell(
-                        borderRadius: BorderRadius.circular(12),
-                        onTap: () => setState(
-                          () => _serversExpanded = !_serversExpanded,
-                        ),
-                        child: Padding(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 8,
-                            vertical: 8,
-                          ),
-                          child: Row(
-                            children: [
-                              Expanded(
-                                child: Text(
-                                  'Серверы · ${_profiles.length}',
-                                  style: theme.textTheme.titleSmall?.copyWith(
-                                    fontWeight: FontWeight.w700,
-                                  ),
-                                ),
-                              ),
-                              Icon(
-                                _serversExpanded
-                                    ? Icons.keyboard_arrow_up_rounded
-                                    : Icons.keyboard_arrow_down_rounded,
-                                color: theme.colorScheme.onSurfaceVariant,
-                              ),
-                            ],
-                          ),
-                        ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+            child: Column(
+              children: [
+                Center(
+                  child: SizedBox(
+                    width: 260,
+                    child: SegmentedButton<VpnMode>(
+                      showSelectedIcon: false,
+                      style: const ButtonStyle(
+                        visualDensity: VisualDensity.compact,
                       ),
+                      segments: [
+                        const ButtonSegment(
+                          value: VpnMode.proxy,
+                          label: Text('Proxy'),
+                        ),
+                        ButtonSegment(
+                          value: VpnMode.tun,
+                          label: const Text('TUN'),
+                          enabled: _runtime.supports(VpnMode.tun),
+                        ),
+                      ],
+                      selected: {_selectedMode},
+                      onSelectionChanged: isRunning || isBusy
+                          ? null
+                          : (selection) => _changeMode(selection.first),
                     ),
                   ),
-                  if (_serversExpanded) ...[
-                    for (final profiles in profilesByGroup.values) ...[
-                      _ServerGroupHeader(
-                        name: profiles.first.groupName,
-                        count: profiles.length,
-                        expanded:
-                            _expandedServerGroups[profiles.first.groupKey] ??
-                                true,
-                        onTap: () => setState(() {
-                          final key = profiles.first.groupKey;
-                          _expandedServerGroups[key] =
-                              !(_expandedServerGroups[key] ?? true);
-                        }),
-                      ),
-                      if (_expandedServerGroups[profiles.first.groupKey] ??
-                          true) ...[
-                        const SizedBox(height: 4),
-                        for (final profile in profiles)
-                          _ServerOption(
-                            profile: profile,
-                            selected: identical(profile, _selectedProfile),
-                            connected: isRunning &&
-                                identical(profile, _selectedProfile),
-                            enabled: !isBusy && !_switchingServer,
-                            onTap: () => _selectProfile(profile),
-                          ),
-                      ],
-                    ],
-                    if (ungroupedProfiles != null) ...[
-                      _ServerGroupHeader(
-                        name: 'Без группы',
-                        count: ungroupedProfiles.length,
-                        expanded: _expandedServerGroups['ungrouped'] ?? true,
-                        onTap: () => setState(() {
-                          _expandedServerGroups['ungrouped'] =
-                              !(_expandedServerGroups['ungrouped'] ?? true);
-                        }),
-                      ),
-                      if (_expandedServerGroups['ungrouped'] ?? true) ...[
-                        const SizedBox(height: 4),
-                        for (final profile in ungroupedProfiles)
-                          _ServerOption(
-                            profile: profile,
-                            selected: identical(profile, _selectedProfile),
-                            connected: isRunning &&
-                                identical(profile, _selectedProfile),
-                            enabled: !isBusy && !_switchingServer,
-                            onTap: () => _selectProfile(profile),
-                          ),
-                      ],
-                    ],
-                  ],
-                ],
-              ),
+                ),
+                const SizedBox(height: 20),
+                _PowerControl(
+                  phase: state.phase,
+                  enabled: !isBusy &&
+                      !_switchingServer &&
+                      !_pinging &&
+                      canConnect &&
+                      _selectedProfile != null,
+                  onPressed: _toggleConnection,
+                ),
+                const SizedBox(height: 12),
+                Text(
+                  _selectedProfile?.name ?? 'Нет выбранной конфигурации',
+                  textAlign: TextAlign.center,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.titleMedium
+                      ?.copyWith(fontWeight: FontWeight.w700),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  _connectionStatus(state),
+                  textAlign: TextAlign.center,
+                  style: theme.textTheme.bodyMedium?.copyWith(
+                    color: state.phase == VpnRuntimePhase.error
+                        ? theme.colorScheme.error
+                        : theme.colorScheme.onSurfaceVariant,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
             ),
+          ),
+          const SizedBox(height: 12),
+          _buildSelectedSubscriptionPanel(
+            subscriptions: subscriptions,
+            canRefresh: state.phase == VpnRuntimePhase.disconnected &&
+                !_switchingServer &&
+                !_refreshingSubscriptions &&
+                !_loadingExternal,
+          ),
+          const SizedBox(height: 12),
+          _buildConfigurationList(
+            enabled: !isBusy && !_switchingServer && !_pinging,
+            isRunning: isRunning,
           ),
           if (state.phase == VpnRuntimePhase.error &&
               state.errorMessage != null) ...[
@@ -399,83 +877,763 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
     );
   }
 
-  Widget _buildProfileView({required bool canUpdate}) {
-    final theme = Theme.of(context);
-    final canSubmit = canUpdate && !_updatingSubscription;
+  List<List<SubscriptionProfile>> _sortedProfileGroups() {
+    final grouped = <String, List<SubscriptionProfile>>{};
+    for (final profile in _profiles) {
+      grouped.putIfAbsent(profile.groupKey, () => []).add(profile);
+    }
 
-    return SingleChildScrollView(
-      padding: const EdgeInsets.fromLTRB(24, 12, 24, 28),
-      child: Card(
-        child: Padding(
-          padding: const EdgeInsets.all(20),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Row(
-                children: [
-                  Expanded(
-                    child: Text(
-                      'Подписка',
-                      style: theme.textTheme.titleMedium
-                          ?.copyWith(fontWeight: FontWeight.w700),
-                    ),
-                  ),
-                  IconButton(
-                    tooltip: 'О хранении кода',
-                    onPressed: _showUuidInfo,
-                    icon: const Icon(Icons.info_outline_rounded),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: _uuidController,
-                enabled: !_updatingSubscription,
-                autocorrect: false,
-                enableSuggestions: false,
-                obscureText: !_showUuid,
-                keyboardType: TextInputType.text,
-                textCapitalization: TextCapitalization.none,
-                onSubmitted: (_) {
-                  if (canSubmit) unawaited(_updateSubscription());
-                },
-                decoration: InputDecoration(
-                  labelText: 'UUID подписки',
-                  prefixIcon: const Icon(Icons.key_rounded),
-                  suffixIcon: IconButton(
-                    tooltip: _showUuid ? 'Скрыть код' : 'Показать код',
-                    onPressed: () => setState(() => _showUuid = !_showUuid),
-                    icon: Icon(_showUuid
-                        ? Icons.visibility_off_rounded
-                        : Icons.visibility_rounded),
-                  ),
-                ),
-              ),
-              if (_subscriptionError != null) ...[
-                const SizedBox(height: 12),
-                Text(
-                  _subscriptionError!,
-                  style: theme.textTheme.bodySmall
-                      ?.copyWith(color: theme.colorScheme.error),
-                ),
-              ],
-              const SizedBox(height: 18),
-              FilledButton.icon(
-                onPressed: canSubmit ? _updateSubscription : null,
-                icon: _updatingSubscription
+    final defaultGroupProfiles = _profiles
+        .where((profile) =>
+            profile.groupIsDefault && profile.groupKey != 'ungrouped')
+        .toList()
+      ..sort((a, b) => a.groupSortOrder.compareTo(b.groupSortOrder));
+    if (defaultGroupProfiles.isNotEmpty) {
+      final ungrouped = grouped.remove('ungrouped');
+      if (ungrouped != null) {
+        grouped[defaultGroupProfiles.first.groupKey]!.addAll(ungrouped);
+      }
+    }
+
+    final groups = grouped.values.toList()
+      ..sort((a, b) {
+        final aDefault = a.any((profile) => profile.groupIsDefault) ||
+            a.first.groupKey == 'ungrouped';
+        final bDefault = b.any((profile) => profile.groupIsDefault) ||
+            b.first.groupKey == 'ungrouped';
+        if (aDefault != bDefault) return aDefault ? 1 : -1;
+        return _groupMetadataProfile(a)
+            .groupSortOrder
+            .compareTo(_groupMetadataProfile(b).groupSortOrder);
+      });
+    for (final group in groups) {
+      group.sort((a, b) => a.sortOrder.compareTo(b.sortOrder));
+    }
+    return groups;
+  }
+
+  SubscriptionProfile _groupMetadataProfile(
+    List<SubscriptionProfile> profiles,
+  ) =>
+      profiles.firstWhere(
+        (profile) => profile.groupKey != 'ungrouped',
+        orElse: () => profiles.first,
+      );
+
+  Widget _buildConfigurationList({
+    required bool enabled,
+    required bool isRunning,
+  }) {
+    final groups = _sortedProfileGroups();
+    final favorites = _profiles.where(_isFavorite).toList()
+      ..sort((a, b) => a.sortOrder.compareTo(b.sortOrder));
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 10, 16, 12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(children: [
+              Expanded(
+                  child: Text('Доступные подключения',
+                      style: Theme.of(context)
+                          .textTheme
+                          .titleMedium
+                          ?.copyWith(fontWeight: FontWeight.w700))),
+              Text('${_profiles.length} доступно',
+                  style: Theme.of(context).textTheme.bodySmall),
+              const SizedBox(width: 4),
+              IconButton(
+                tooltip: _pingingAll
+                    ? 'Проверяем все подключения…'
+                    : 'Проверить доступность всех серверов через профиль',
+                visualDensity: VisualDensity.compact,
+                onPressed: _profiles.isEmpty || _pingingAll || _pinging
+                    ? null
+                    : () => unawaited(_pingAllProfiles()),
+                icon: _pingingAll
                     ? const SizedBox(
                         width: 18,
                         height: 18,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2,
-                          color: Colors.white,
-                        ),
+                        child: CircularProgressIndicator(strokeWidth: 2),
                       )
-                    : const Icon(Icons.sync_rounded),
-                label: Text(
-                    _updatingSubscription ? 'Загружаем…' : 'Обновить подписку'),
+                    : const Icon(Icons.speed_rounded),
+              ),
+            ]),
+            if (_profiles.isEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 12, bottom: 4),
+                child: Text(_primarySubscriptionError ??
+                    'Выберите подписку с доступными конфигурациями.'),
+              ),
+            if (favorites.isNotEmpty) ...[
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Material(
+                  color: Colors.transparent,
+                  borderRadius: BorderRadius.circular(12),
+                  child: InkWell(
+                    borderRadius: BorderRadius.circular(12),
+                    splashFactory: NoSplash.splashFactory,
+                    mouseCursor: SystemMouseCursors.click,
+                    overlayColor: WidgetStateProperty.resolveWith((states) {
+                      final colors = Theme.of(context).colorScheme;
+                      if (states.contains(WidgetState.pressed)) {
+                        return colors.primary.withValues(alpha: 0.08);
+                      }
+                      if (states.contains(WidgetState.hovered)) {
+                        return colors.onSurface.withValues(alpha: 0.045);
+                      }
+                      if (states.contains(WidgetState.focused)) {
+                        return colors.primary.withValues(alpha: 0.05);
+                      }
+                      return Colors.transparent;
+                    }),
+                    onTap: () => setState(
+                        () => _favoritesExpanded = !_favoritesExpanded),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 8, vertical: 6),
+                      child: Row(children: [
+                        Icon(Icons.star_rounded,
+                            size: 17,
+                            color: Theme.of(context).colorScheme.primary),
+                        const SizedBox(width: 6),
+                        Text('Избранное',
+                            style: Theme.of(context)
+                                .textTheme
+                                .bodyMedium
+                                ?.copyWith(fontWeight: FontWeight.w600)),
+                        const Spacer(),
+                        Text('${favorites.length}',
+                            style: Theme.of(context).textTheme.labelSmall),
+                        const SizedBox(width: 6),
+                        Icon(
+                          _favoritesExpanded
+                              ? Icons.expand_less
+                              : Icons.expand_more,
+                          size: 18,
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
+                        ),
+                      ]),
+                    ),
+                  ),
+                ),
+              ),
+              if (_favoritesExpanded)
+                ..._configurationRows(
+                  favorites,
+                  enabled: enabled,
+                  favoriteEnabled: !_savingFavorites,
+                  isRunning: isRunning,
+                ),
+              const SizedBox(height: 8),
+              const Divider(
+                height: 1,
+                thickness: 1,
+                color: Color(0xFFE7E7EA),
               ),
             ],
+            if (groups.length == 1 &&
+                groups.single.first.groupKey == 'ungrouped')
+              ..._configurationRows(
+                groups.single,
+                enabled: enabled,
+                favoriteEnabled: !_savingFavorites,
+                isRunning: isRunning,
+              )
+            else
+              for (var i = 0; i < groups.length; i++) ...[
+                if (i == 0)
+                  const SizedBox(height: 8)
+                else ...[
+                  const SizedBox(height: 8),
+                  const Divider(
+                    height: 1,
+                    thickness: 1,
+                    color: Color(0xFFE7E7EA),
+                  ),
+                  const SizedBox(height: 8),
+                ],
+                _configurationGroup(
+                  groups[i],
+                  enabled: enabled,
+                  favoriteEnabled: !_savingFavorites,
+                  isRunning: isRunning,
+                ),
+              ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  List<Widget> _configurationRows(
+    List<SubscriptionProfile> profiles, {
+    required bool enabled,
+    required bool favoriteEnabled,
+    required bool isRunning,
+    double indent = 0,
+  }) =>
+      [
+        for (var i = 0; i < profiles.length; i++) ...[
+          SizedBox(height: i == 0 ? 8 : 4),
+          Padding(
+            padding: EdgeInsets.only(left: indent),
+            child: _ServerOption(
+              profile: profiles[i],
+              selected: identical(profiles[i], _selectedProfile),
+              connected: isRunning && identical(profiles[i], _selectedProfile),
+              pingMs: _pingResults[profiles[i]],
+              pinging: _pingingProfiles.contains(profiles[i]),
+              enabled: enabled,
+              favorite: _isFavorite(profiles[i]),
+              favoriteEnabled: favoriteEnabled,
+              onToggleFavorite: () => unawaited(_toggleFavorite(profiles[i])),
+              onTap: () => _selectProfile(profiles[i]),
+              onPing: () => unawaited(_pingProfile(profiles[i])),
+            ),
+          ),
+        ],
+      ];
+
+  Widget _configurationGroup(
+    List<SubscriptionProfile> profiles, {
+    required bool enabled,
+    required bool favoriteEnabled,
+    required bool isRunning,
+  }) {
+    final first = _groupMetadataProfile(profiles);
+    final key = first.groupKey;
+    final expanded = _expandedServerGroups[key] ?? first.groupExpandedByDefault;
+    final colors = Theme.of(context).colorScheme;
+    return Column(children: [
+      LayoutBuilder(
+        builder: (context, constraints) {
+          final width = constraints.maxWidth;
+          return OverflowBox(
+            alignment: Alignment.centerLeft,
+            minWidth: width,
+            maxWidth: width + 8,
+            fit: OverflowBoxFit.deferToChild,
+            child: Transform.translate(
+              offset: const Offset(-8, 0),
+              child: SizedBox(
+                width: width + 8,
+                child: Material(
+                  color: Colors.transparent,
+                  borderRadius: BorderRadius.circular(12),
+                  child: InkWell(
+                    borderRadius: BorderRadius.circular(12),
+                    splashFactory: NoSplash.splashFactory,
+                    mouseCursor: SystemMouseCursors.click,
+                    overlayColor: WidgetStateProperty.resolveWith((states) {
+                      if (states.contains(WidgetState.pressed)) {
+                        return colors.primary.withValues(alpha: 0.08);
+                      }
+                      if (states.contains(WidgetState.hovered)) {
+                        return colors.onSurface.withValues(alpha: 0.045);
+                      }
+                      if (states.contains(WidgetState.focused)) {
+                        return colors.primary.withValues(alpha: 0.05);
+                      }
+                      return Colors.transparent;
+                    }),
+                    onTap: () =>
+                        setState(() => _expandedServerGroups[key] = !expanded),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 8, vertical: 6),
+                      child: Row(children: [
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text(first.groupName,
+                                  style: Theme.of(context)
+                                      .textTheme
+                                      .bodyMedium
+                                      ?.copyWith(fontWeight: FontWeight.w600)),
+                              if (first.groupDescription != null)
+                                Text(first.groupDescription!,
+                                    maxLines: 2,
+                                    overflow: TextOverflow.ellipsis,
+                                    style:
+                                        Theme.of(context).textTheme.bodySmall),
+                            ],
+                          ),
+                        ),
+                        Text('${profiles.length}',
+                            style: Theme.of(context).textTheme.labelSmall),
+                        const SizedBox(width: 6),
+                        Icon(expanded ? Icons.expand_less : Icons.expand_more,
+                            size: 18,
+                            color:
+                                Theme.of(context).colorScheme.onSurfaceVariant),
+                      ]),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          );
+        },
+      ),
+      if (expanded)
+        ..._configurationRows(
+          profiles,
+          enabled: enabled,
+          favoriteEnabled: favoriteEnabled,
+          isRunning: isRunning,
+          indent: 0,
+        ),
+    ]);
+  }
+
+  Widget _buildSubscriptionsView({required bool canUpdate}) {
+    final sets = _subscriptionSets();
+    final canModify = canUpdate && !_loadingExternal;
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(8, 20, 8, 24),
+      children: [
+        Row(children: [
+          Expanded(
+              child: Text('Подписки',
+                  style: Theme.of(context)
+                      .textTheme
+                      .headlineSmall
+                      ?.copyWith(fontWeight: FontWeight.w800))),
+          IconButton(
+            tooltip: 'Обновить подписки',
+            onPressed: canModify ? _updateSubscriptions : null,
+            icon: _refreshingSubscriptions
+                ? const SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(strokeWidth: 2))
+                : const Icon(Icons.refresh_rounded),
+          ),
+        ]),
+        const SizedBox(height: 8),
+        if (sets.isEmpty)
+          Card(
+              child: Padding(
+            padding: const EdgeInsets.all(18),
+            child: Text(_primarySubscriptionError ??
+                'Добавьте подписку, чтобы загрузить конфигурации.'),
+          )),
+        for (final entry in sets.entries)
+          _subscriptionCard(entry.key, entry.value,
+              selected: entry.key == _activeSubscriptionKey,
+              enabled: canModify),
+        if (_subscriptionError != null)
+          Padding(
+              padding: const EdgeInsets.symmetric(vertical: 8),
+              child: Text(_subscriptionError!,
+                  style:
+                      TextStyle(color: Theme.of(context).colorScheme.error))),
+        const SizedBox(height: 10),
+        _buildExternalSubscriptionManager(canModify: canModify),
+      ],
+    );
+  }
+
+  Widget _subscriptionCard(
+    String key,
+    List<SubscriptionProfile> profiles, {
+    required bool selected,
+    required bool enabled,
+  }) {
+    final metadata = _metadataFor(key);
+    final own = key == 'oksana';
+    return Card(
+      margin: const EdgeInsets.only(bottom: 10),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(16),
+        onTap: enabled ? () => unawaited(_selectSubscription(key)) : null,
+        child: Padding(
+          padding: const EdgeInsets.all(14),
+          child:
+              Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Row(children: [
+              Icon(own ? Icons.shield_outlined : Icons.link_rounded,
+                  color: Theme.of(context).colorScheme.primary),
+              const SizedBox(width: 10),
+              Expanded(
+                  child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                    Text(metadata.title ?? _subscriptionName(key),
+                        style: const TextStyle(fontWeight: FontWeight.w700)),
+                    Text(own ? 'Наша подписка' : 'Сторонняя подписка',
+                        style: Theme.of(context).textTheme.bodySmall),
+                  ])),
+              if (selected)
+                Icon(Icons.check_circle_rounded,
+                    color: Theme.of(context).colorScheme.primary),
+              if (!selected) const Icon(Icons.chevron_right_rounded),
+            ]),
+            if (metadata.uploadBytes != null ||
+                metadata.downloadBytes != null ||
+                metadata.totalBytes != null ||
+                metadata.devicesUsed != null ||
+                metadata.devicesLimit != null ||
+                metadata.expiresAt != null) ...[
+              const Divider(height: 20),
+              _subscriptionMetadataLines(metadata),
+            ],
+            if (profiles.isEmpty)
+              const Padding(
+                  padding: EdgeInsets.only(top: 8),
+                  child: Text('Нет доступных конфигураций')),
+          ]),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSelectedSubscriptionPanel({
+    required Map<String, List<SubscriptionProfile>> subscriptions,
+    required bool canRefresh,
+  }) {
+    final theme = Theme.of(context);
+    final metadata = _metadataFor(_activeSubscriptionKey);
+    final activeName = _activeSubscriptionKey == null
+        ? 'Нет выбранной подписки'
+        : _subscriptionName(_activeSubscriptionKey!);
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: subscriptions.length > 1
+                      ? DropdownButtonHideUnderline(
+                          child: DropdownButton<String>(
+                            value: subscriptions
+                                    .containsKey(_activeSubscriptionKey)
+                                ? _activeSubscriptionKey
+                                : subscriptions.keys.first,
+                            isExpanded: true,
+                            icon: const Icon(Icons.expand_more_rounded),
+                            items: [
+                              for (final key in subscriptions.keys)
+                                DropdownMenuItem<String>(
+                                  value: key,
+                                  child: Text(
+                                    _subscriptionName(key),
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ),
+                            ],
+                            onChanged: _switchingServer
+                                ? null
+                                : (key) {
+                                    if (key != null) {
+                                      unawaited(_selectSubscription(key));
+                                    }
+                                  },
+                          ),
+                        )
+                      : Text(
+                          metadata.title ?? activeName,
+                          overflow: TextOverflow.ellipsis,
+                          style: theme.textTheme.titleMedium
+                              ?.copyWith(fontWeight: FontWeight.w700),
+                        ),
+                ),
+                IconButton(
+                  tooltip: _refreshingSubscriptions
+                      ? 'Обновляем подписки…'
+                      : 'Обновить подписки',
+                  visualDensity: VisualDensity.compact,
+                  constraints:
+                      const BoxConstraints.tightFor(width: 36, height: 36),
+                  padding: EdgeInsets.zero,
+                  onPressed: _refreshingSubscriptions || !canRefresh
+                      ? null
+                      : _updateSubscriptions,
+                  icon: _refreshingSubscriptions
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.refresh_rounded),
+                ),
+              ],
+            ),
+            if (metadata.updateInterval != null ||
+                metadata.webPageUrl != null ||
+                metadata.announceUrl != null ||
+                metadata.supportUrl != null ||
+                metadata.devicesLimit != null ||
+                metadata.devicesUsed != null ||
+                metadata.totalBytes != null ||
+                metadata.expiresAt != null ||
+                metadata.uploadBytes != null ||
+                metadata.downloadBytes != null) ...[
+              const SizedBox(height: 10),
+              _subscriptionMetadataLines(metadata),
+            ],
+            if (_subscriptionError != null) ...[
+              const SizedBox(height: 8),
+              Text(_subscriptionError!,
+                  style: theme.textTheme.bodySmall
+                      ?.copyWith(color: theme.colorScheme.error)),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _subscriptionMetadataLines(SubscriptionMetadata metadata) {
+    final items = <Widget>[];
+    if (metadata.uploadBytes != null) {
+      items.add(_metadataChip(
+        Icons.north_east_rounded,
+        'Исходящий трафик',
+        _formatBytes(metadata.uploadBytes!),
+      ));
+    }
+    if (metadata.downloadBytes != null) {
+      items.add(_metadataChip(
+        Icons.south_west_rounded,
+        'Входящий трафик',
+        _formatBytes(metadata.downloadBytes!),
+      ));
+    }
+    if (metadata.totalBytes != null) {
+      items.add(_metadataChip(
+        Icons.data_usage_rounded,
+        'Лимит трафика',
+        metadata.totalBytes == 0 ? '∞' : _formatBytes(metadata.totalBytes!),
+      ));
+    }
+    if (metadata.expiresAt != null && metadata.expiresAt! > 0) {
+      final date = DateTime.fromMillisecondsSinceEpoch(
+        metadata.expiresAt! * 1000,
+      ).toLocal();
+      items.add(_metadataChip(
+        Icons.event_available_rounded,
+        'Действует до',
+        '${date.day.toString().padLeft(2, '0')}.${date.month.toString().padLeft(2, '0')}.${date.year}',
+      ));
+    }
+    if (metadata.devicesLimit != null || metadata.devicesUsed != null) {
+      items.add(_metadataChip(
+        Icons.devices_rounded,
+        'Устройства',
+        '${metadata.devicesUsed ?? 0}/${metadata.devicesLimit ?? '∞'}',
+      ));
+    }
+    if (metadata.refreshInterval != null) {
+      items.add(_metadataChip(
+        Icons.autorenew_rounded,
+        'Автообновление',
+        '${metadata.refreshInterval!.inHours} ч',
+      ));
+    } else if (metadata.updateInterval != null) {
+      items.add(_metadataChip(
+        Icons.autorenew_rounded,
+        'Интервал обновления',
+        metadata.updateInterval!,
+      ));
+    }
+    if (metadata.webPageUrl != null) {
+      items.add(_metadataLink(
+        icon: Icons.language_rounded,
+        tooltip: 'Открыть сайт подписки',
+        url: metadata.webPageUrl!,
+      ));
+    }
+    if (metadata.supportUrl != null) {
+      items.add(_metadataLink(
+        icon: Icons.support_agent_rounded,
+        tooltip: 'Открыть поддержку',
+        url: metadata.supportUrl!,
+      ));
+    }
+    if (metadata.announceUrl != null) {
+      items.add(_metadataLink(
+        icon: Icons.campaign_outlined,
+        tooltip: 'Открыть канал объявлений',
+        url: metadata.announceUrl!,
+      ));
+    }
+
+    return Wrap(
+      spacing: 14,
+      runSpacing: 8,
+      crossAxisAlignment: WrapCrossAlignment.center,
+      children: items,
+    );
+  }
+
+  Widget _metadataChip(IconData icon, String label, String value) {
+    return Tooltip(
+      message: label,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 4),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 15, color: Theme.of(context).colorScheme.primary),
+            const SizedBox(width: 6),
+            Text(value, style: Theme.of(context).textTheme.labelMedium),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _metadataLink({
+    required IconData icon,
+    required String tooltip,
+    required String url,
+  }) {
+    return IconButton(
+      tooltip: tooltip,
+      visualDensity: VisualDensity.compact,
+      constraints: const BoxConstraints.tightFor(width: 36, height: 36),
+      padding: const EdgeInsets.all(4),
+      splashRadius: 18,
+      onPressed: () => unawaited(_openExternalLink(url)),
+      icon: Icon(icon, size: 19),
+    );
+  }
+
+  String _formatBytes(int bytes) {
+    if (bytes < 1024) return '$bytes Б';
+    const units = ['КБ', 'МБ', 'ГБ', 'ТБ'];
+    var value = bytes / 1024;
+    var unitIndex = 0;
+    while (value >= 1024 && unitIndex < units.length - 1) {
+      value /= 1024;
+      unitIndex++;
+    }
+    return '${value.toStringAsFixed(value >= 10 ? 0 : 1)} ${units[unitIndex]}';
+  }
+
+  Widget _buildExternalSubscriptionManager({required bool canModify}) {
+    final theme = Theme.of(context);
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text('Добавить подписку',
+                style: theme.textTheme.titleSmall
+                    ?.copyWith(fontWeight: FontWeight.w700)),
+            const SizedBox(height: 8),
+            for (var i = 0; i < _externalUrls.length; i++)
+              ListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.link_rounded),
+                title: Text(
+                  _externalMetadataByUrl[_externalUrls[i]]?.title ??
+                      'Сторонняя подписка ${i + 1}',
+                ),
+                trailing: IconButton(
+                  tooltip: 'Удалить подписку',
+                  onPressed: !canModify || _loadingExternal
+                      ? null
+                      : () => unawaited(
+                          _removeExternalSubscription(_externalUrls[i])),
+                  icon: const Icon(Icons.delete_outline_rounded),
+                ),
+              ),
+            TextField(
+              controller: _externalUrlController,
+              enabled: canModify && !_loadingExternal,
+              autocorrect: false,
+              keyboardType: TextInputType.url,
+              textCapitalization: TextCapitalization.none,
+              decoration: const InputDecoration(
+                labelText: 'HTTPS-ссылка подписки',
+                prefixIcon: Icon(Icons.add_link_rounded),
+              ),
+            ),
+            if (_externalError != null) ...[
+              const SizedBox(height: 8),
+              Text(_externalError!,
+                  style: theme.textTheme.bodySmall
+                      ?.copyWith(color: theme.colorScheme.error)),
+            ],
+            const SizedBox(height: 10),
+            OutlinedButton.icon(
+              onPressed: canModify && !_loadingExternal
+                  ? _addExternalSubscription
+                  : null,
+              icon: _loadingExternal
+                  ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.add_rounded),
+              label:
+                  Text(_loadingExternal ? 'Загружаем…' : 'Добавить подписку'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildProfileView({required bool canUpdate}) {
+    final theme = Theme.of(context);
+    return Center(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 560),
+        child: Card(
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Text('Профиль',
+                    style: theme.textTheme.titleMedium
+                        ?.copyWith(fontWeight: FontWeight.w700)),
+                const SizedBox(height: 12),
+                if (widget.authToken == null) ...[
+                  const Text(
+                      'Войдите, чтобы получить доступ к подписке Oksana VPN.'),
+                  const SizedBox(height: 16),
+                  FilledButton.icon(
+                    onPressed: canUpdate
+                        ? () =>
+                            Navigator.of(context).pushReplacement<void, void>(
+                              MaterialPageRoute<void>(
+                                builder: (_) => const SubscriptionScreen(),
+                              ),
+                            )
+                        : null,
+                    icon: const Icon(Icons.login_rounded),
+                    label: const Text('Войти'),
+                  ),
+                ] else ...[
+                  Text(widget.accountName.isEmpty
+                      ? 'Вход выполнен'
+                      : widget.accountName),
+                  const SizedBox(height: 16),
+                  OutlinedButton.icon(
+                    onPressed: canUpdate ? _logout : null,
+                    icon: const Icon(Icons.logout_rounded),
+                    label: const Text('Выйти из аккаунта'),
+                  ),
+                ],
+              ],
+            ),
           ),
         ),
       ),
@@ -496,22 +1654,6 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
       VpnRuntimePhase.error => 'Не удалось подключиться',
       VpnRuntimePhase.disconnected => 'Не подключено',
     };
-  }
-
-  Future<void> _showUuidInfo() async {
-    await showDialog<void>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Код подписки'),
-        content: const Text('Код подписки сохраняется на устройстве.'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text('Понятно'),
-          ),
-        ],
-      ),
-    );
   }
 }
 
@@ -584,73 +1726,32 @@ class _PowerControl extends StatelessWidget {
   }
 }
 
-class _ServerGroupHeader extends StatelessWidget {
-  const _ServerGroupHeader({
-    required this.name,
-    required this.count,
-    required this.expanded,
-    required this.onTap,
-  });
-
-  final String name;
-  final int count;
-  final bool expanded;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Padding(
-      padding: const EdgeInsets.only(top: 8),
-      child: Material(
-        color: Colors.transparent,
-        borderRadius: BorderRadius.circular(10),
-        child: InkWell(
-          onTap: onTap,
-          borderRadius: BorderRadius.circular(10),
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 7),
-            child: Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    '$name · $count',
-                    style: theme.textTheme.labelMedium?.copyWith(
-                      color: theme.colorScheme.onSurfaceVariant,
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                ),
-                Icon(
-                  expanded
-                      ? Icons.keyboard_arrow_up_rounded
-                      : Icons.keyboard_arrow_down_rounded,
-                  size: 20,
-                  color: theme.colorScheme.onSurfaceVariant,
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
 class _ServerOption extends StatelessWidget {
   const _ServerOption({
     required this.profile,
     required this.selected,
     required this.connected,
+    required this.pingMs,
+    required this.pinging,
     required this.enabled,
+    required this.favorite,
+    required this.favoriteEnabled,
     required this.onTap,
+    required this.onPing,
+    required this.onToggleFavorite,
   });
 
   final SubscriptionProfile profile;
   final bool selected;
   final bool connected;
+  final int? pingMs;
+  final bool pinging;
   final bool enabled;
+  final bool favorite;
+  final bool favoriteEnabled;
   final VoidCallback onTap;
+  final VoidCallback onPing;
+  final VoidCallback onToggleFavorite;
 
   @override
   Widget build(BuildContext context) {
@@ -671,14 +1772,14 @@ class _ServerOption extends StatelessWidget {
         onTap: enabled ? onTap : null,
         borderRadius: BorderRadius.circular(12),
         child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
+          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
           child: Row(
             children: [
               SizedBox(
                 width: 24,
                 child: leadingEmoji == null
                     ? Icon(
-                        Icons.public_rounded,
+                        _metadataIcon(profile.icon, Icons.public_rounded),
                         size: 20,
                         color:
                             selected ? colors.primary : colors.onSurfaceVariant,
@@ -689,14 +1790,26 @@ class _ServerOption extends StatelessWidget {
                         style: theme.textTheme.titleMedium,
                       ),
               ),
-              const SizedBox(width: 12),
+              const SizedBox(width: 8),
               Expanded(
-                child: Text(
-                  title,
-                  overflow: TextOverflow.ellipsis,
-                  style: theme.textTheme.bodyMedium?.copyWith(
-                    fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
-                  ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      title,
+                      overflow: TextOverflow.ellipsis,
+                      maxLines: 1,
+                      style: theme.textTheme.bodyMedium?.copyWith(
+                        fontWeight:
+                            selected ? FontWeight.w700 : FontWeight.w500,
+                      ),
+                    ),
+                    if (profile.description != null)
+                      Text(profile.description!,
+                          style: theme.textTheme.bodySmall
+                              ?.copyWith(color: colors.onSurfaceVariant)),
+                  ],
                 ),
               ),
               if (connected)
@@ -710,6 +1823,43 @@ class _ServerOption extends StatelessWidget {
                     ),
                   ),
                 ),
+              if (pinging)
+                const Padding(
+                  padding: EdgeInsets.only(right: 8),
+                  child: SizedBox(
+                    width: 14,
+                    height: 14,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
+                )
+              else if (pingMs != null)
+                Padding(
+                  padding: const EdgeInsets.only(right: 4),
+                  child: Text(
+                    pingMs! < 0 ? '—' : '${pingMs!} мс',
+                    style: theme.textTheme.labelSmall?.copyWith(
+                      color:
+                          pingMs! < 0 ? colors.error : colors.onSurfaceVariant,
+                    ),
+                  ),
+                ),
+              IconButton(
+                tooltip: 'Проверить доступность через профиль',
+                visualDensity: VisualDensity.compact,
+                onPressed: enabled && !pinging ? onPing : null,
+                icon: const Icon(Icons.speed_rounded, size: 18),
+              ),
+              IconButton(
+                tooltip:
+                    favorite ? 'Убрать из избранного' : 'Добавить в избранное',
+                visualDensity: VisualDensity.compact,
+                onPressed: favoriteEnabled ? onToggleFavorite : null,
+                icon: Icon(
+                  favorite ? Icons.star_rounded : Icons.star_outline_rounded,
+                  size: 19,
+                  color: favorite ? colors.primary : colors.onSurfaceVariant,
+                ),
+              ),
               Icon(
                 selected
                     ? Icons.check_circle_rounded
@@ -754,3 +1904,14 @@ bool _isEmojiCodePoint(int codePoint) {
         0x3299,
       }.contains(codePoint);
 }
+
+IconData _metadataIcon(String? value, IconData fallback) => switch (value) {
+      'bolt' || 'automatic' => Icons.bolt_rounded,
+      'wifi' => Icons.wifi_rounded,
+      'cellular' || 'signal' => Icons.signal_cellular_alt_rounded,
+      'layers' || 'servers' => Icons.layers_outlined,
+      'link' || 'bypass' => Icons.link_rounded,
+      'chat' || 'messengers' => Icons.chat_bubble_outline_rounded,
+      'shield' => Icons.shield_outlined,
+      _ => fallback,
+    };

@@ -1,9 +1,13 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
+import '../models/subscription_metadata.dart';
+import '../models/subscription_profile.dart';
+import '../services/auth_api.dart';
+import '../services/auth_store.dart';
 import '../services/subscription_api.dart';
-import '../services/subscription_store.dart';
 import '../widgets/brand_header.dart';
 import 'vpn_home_screen.dart';
 
@@ -15,40 +19,45 @@ class SubscriptionScreen extends StatefulWidget {
 }
 
 class _SubscriptionScreenState extends State<SubscriptionScreen> {
-  final _uuidController = TextEditingController();
+  static const _deepLinkChannel = MethodChannel('oksanavpn/deep_links');
+  final _loginController = TextEditingController();
+  final _passwordController = TextEditingController();
+  final _authApi = AuthApi();
   final _api = SubscriptionApi();
-  final _subscriptionStore = const SubscriptionStore();
+  final _authStore = const AuthStore();
   bool _restoring = true;
   bool _loading = false;
-  bool _showUuid = false;
+  bool _showPassword = false;
+  bool _openingTelegram = false;
   String? _error;
 
   @override
   void initState() {
     super.initState();
-    _restoreSavedUuid();
+    _restoreSession();
   }
 
-  Future<void> _restoreSavedUuid() async {
+  Future<void> _restoreSession() async {
     try {
-      final uuid = await _subscriptionStore.readUuid();
+      final token = await _authStore.readToken();
       if (!mounted) return;
-      if (uuid == null || _uuidController.text.isNotEmpty) {
+      if (token == null || token.isEmpty) {
         setState(() => _restoring = false);
         return;
       }
-
-      _uuidController.value = TextEditingValue(
-        text: uuid,
-        selection: TextSelection.collapsed(offset: uuid.length),
-      );
-      setState(() => _restoring = false);
-      await _loadSubscription(uuid: uuid, saveUuid: false);
+      setState(() => _loading = true);
+      await _continueWithToken(token);
     } catch (_) {
       if (mounted) {
+        try {
+          await _authStore.clear();
+        } catch (_) {
+          // Continue to the sign-in form if Keychain is temporarily unavailable.
+        }
         setState(() {
           _restoring = false;
-          _error = 'Не удалось восстановить сохранённый код подписки.';
+          _loading = false;
+          _error = 'Сессия не восстановлена. Войдите снова.';
         });
       }
     }
@@ -56,59 +65,108 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
 
   @override
   void dispose() {
-    _uuidController.dispose();
+    _loginController.dispose();
+    _passwordController.dispose();
+    _authApi.close();
     _api.close();
     super.dispose();
   }
 
-  Future<void> _loadSubscription({String? uuid, bool saveUuid = true}) async {
+  Future<void> _login() async {
     FocusScope.of(context).unfocus();
-    String? storageWarning;
+    if (_loginController.text.trim().isEmpty ||
+        _passwordController.text.isEmpty) {
+      setState(() => _error = 'Введите логин и пароль.');
+      return;
+    }
     setState(() {
       _loading = true;
       _error = null;
     });
-
     try {
-      final value = (uuid ?? _uuidController.text).trim();
-      final profiles = await _api.fetchProfiles(value);
-      if (saveUuid && SubscriptionApi.isValidUuid(value)) {
-        try {
-          await _subscriptionStore.saveUuid(value);
-        } catch (_) {
-          storageWarning =
-              'Код не удалось сохранить на устройстве. Подписка всё равно будет загружена.';
-        }
-      }
-
-      if (!mounted) return;
-      if (storageWarning != null) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(storageWarning)),
-        );
-      }
-
-      unawaited(
-        Navigator.of(context).pushReplacement<void, void>(
-          MaterialPageRoute<void>(
-            builder: (_) => VpnHomeScreen(
-              profiles: profiles,
-              subscriptionUuid: value,
-            ),
-          ),
-        ),
-      );
-    } on SubscriptionApiException catch (error) {
+      final token =
+          await _authApi.login(_loginController.text, _passwordController.text);
+      await _continueWithToken(token, persist: true);
+    } on AuthApiException catch (error) {
       if (mounted) {
-        setState(() {
-          _error = storageWarning == null
-              ? error.message
-              : '${error.message}\n$storageWarning';
-        });
+        setState(() => _error = error.message);
+      }
+    } on SubscriptionApiException catch (error) {
+      if (mounted) setState(() => _error = error.message);
+    } catch (_) {
+      if (mounted) {
+        setState(() => _error = 'Не удалось безопасно сохранить сессию.');
       }
     } finally {
+      if (mounted && _restoring) setState(() => _restoring = false);
       if (mounted) setState(() => _loading = false);
     }
+  }
+
+  Future<void> _startTelegramLogin() async {
+    if (_loading || _openingTelegram) return;
+    FocusScope.of(context).unfocus();
+    setState(() {
+      _openingTelegram = true;
+      _error = null;
+    });
+    try {
+      final opened = await _deepLinkChannel.invokeMethod<bool>(
+        'openTelegramLogin',
+        'https://public.oksana1984.ru/login?desktop=1',
+      );
+      if (opened != true) {
+        throw PlatformException(code: 'browser_unavailable');
+      }
+    } on PlatformException {
+      if (mounted) {
+        setState(
+            () => _error = 'Не удалось открыть страницу входа в браузере.');
+      }
+    } finally {
+      if (mounted) setState(() => _openingTelegram = false);
+    }
+  }
+
+  void _openSubscriptionsWithoutLogin() {
+    Navigator.of(context).pushReplacement<void, void>(
+      MaterialPageRoute<void>(
+        builder: (_) => const VpnHomeScreen(
+          profiles: [],
+          accountName: '',
+          initialTab: 0,
+        ),
+      ),
+    );
+  }
+
+  Future<void> _continueWithToken(String token, {bool persist = false}) async {
+    final profile = await _authApi.fetchProfile(token);
+    var profiles = <SubscriptionProfile>[];
+    var primaryMetadata = const SubscriptionMetadata();
+    String? primarySubscriptionError;
+    try {
+      final loaded = await _api.fetchProfiles(profile.uuid);
+      profiles = loaded.profiles;
+      primaryMetadata = loaded.metadata;
+    } on SubscriptionApiException catch (error) {
+      primarySubscriptionError = error.message;
+    }
+    if (!mounted) return;
+    if (persist) await _authStore.saveToken(token);
+    if (!mounted) return;
+    _restoring = false;
+    unawaited(Navigator.of(context).pushReplacement<void, void>(
+      MaterialPageRoute<void>(
+        builder: (_) => VpnHomeScreen(
+          profiles: profiles,
+          accountName: profile.name,
+          authToken: token,
+          primarySubscriptionError: primarySubscriptionError,
+          primaryMetadata: primaryMetadata,
+        ),
+      ),
+    ));
   }
 
   @override
@@ -118,7 +176,7 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
       body: SafeArea(
         child: Center(
           child: SingleChildScrollView(
-            padding: const EdgeInsets.all(32),
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 32),
             child: ConstrainedBox(
               constraints: const BoxConstraints(maxWidth: 560),
               child: Column(
@@ -158,45 +216,43 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.stretch,
                           children: [
-                            Row(
-                              children: [
-                                Expanded(
-                                  child: Text(
-                                    'Подписка',
-                                    style:
-                                        theme.textTheme.titleMedium?.copyWith(
-                                      fontWeight: FontWeight.w700,
-                                    ),
-                                  ),
-                                ),
-                                IconButton(
-                                  tooltip: 'О хранении кода',
-                                  onPressed: _showUuidInfo,
-                                  icon: const Icon(Icons.info_outline_rounded),
-                                ),
-                              ],
+                            Text(
+                              'Вход',
+                              style: theme.textTheme.titleMedium?.copyWith(
+                                fontWeight: FontWeight.w700,
+                              ),
                             ),
-                            const SizedBox(height: 8),
+                            const SizedBox(height: 16),
                             TextField(
-                              controller: _uuidController,
+                              controller: _loginController,
                               enabled: !_loading,
                               autocorrect: false,
-                              enableSuggestions: false,
-                              obscureText: !_showUuid,
-                              keyboardType: TextInputType.text,
-                              textCapitalization: TextCapitalization.none,
-                              onSubmitted: (_) async {
-                                if (!_loading) await _loadSubscription();
+                              textInputAction: TextInputAction.next,
+                              decoration: InputDecoration(
+                                labelText: 'Логин',
+                                prefixIcon:
+                                    const Icon(Icons.person_outline_rounded),
+                              ),
+                            ),
+                            const SizedBox(height: 12),
+                            TextField(
+                              controller: _passwordController,
+                              enabled: !_loading,
+                              obscureText: !_showPassword,
+                              onSubmitted: (_) {
+                                if (!_loading) unawaited(_login());
                               },
                               decoration: InputDecoration(
-                                labelText: 'UUID подписки',
-                                prefixIcon: const Icon(Icons.key_rounded),
+                                labelText: 'Пароль',
+                                prefixIcon:
+                                    const Icon(Icons.lock_outline_rounded),
                                 suffixIcon: IconButton(
-                                  tooltip:
-                                      _showUuid ? 'Скрыть код' : 'Показать код',
-                                  onPressed: () =>
-                                      setState(() => _showUuid = !_showUuid),
-                                  icon: Icon(_showUuid
+                                  tooltip: _showPassword
+                                      ? 'Скрыть пароль'
+                                      : 'Показать пароль',
+                                  onPressed: () => setState(
+                                      () => _showPassword = !_showPassword),
+                                  icon: Icon(_showPassword
                                       ? Icons.visibility_off_rounded
                                       : Icons.visibility_rounded),
                                 ),
@@ -208,7 +264,8 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
                             ],
                             const SizedBox(height: 18),
                             FilledButton.icon(
-                              onPressed: _loading ? null : _loadSubscription,
+                              onPressed:
+                                  _loading || _openingTelegram ? null : _login,
                               icon: _loading
                                   ? const SizedBox(
                                       width: 18,
@@ -216,10 +273,33 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
                                       child: CircularProgressIndicator(
                                           strokeWidth: 2, color: Colors.white),
                                     )
-                                  : const Icon(Icons.arrow_forward_rounded),
-                              label: Text(_loading
-                                  ? 'Загружаем подписку…'
-                                  : 'Продолжить'),
+                                  : const Icon(Icons.login_rounded),
+                              label: Text(_loading ? 'Входим…' : 'Войти'),
+                            ),
+                            const SizedBox(height: 12),
+                            OutlinedButton.icon(
+                              onPressed: _loading || _openingTelegram
+                                  ? null
+                                  : _startTelegramLogin,
+                              icon: _openingTelegram
+                                  ? const SizedBox(
+                                      width: 18,
+                                      height: 18,
+                                      child: CircularProgressIndicator(
+                                          strokeWidth: 2),
+                                    )
+                                  : const Icon(Icons.send_rounded),
+                              label: Text(_openingTelegram
+                                  ? 'Открываем Telegram-вход…'
+                                  : 'Войти через Telegram'),
+                            ),
+                            const SizedBox(height: 8),
+                            TextButton.icon(
+                              onPressed: _loading || _openingTelegram
+                                  ? null
+                                  : _openSubscriptionsWithoutLogin,
+                              icon: const Icon(Icons.person_off_outlined),
+                              label: const Text('Открыть подписки без входа'),
                             ),
                           ],
                         ),
@@ -230,22 +310,6 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
             ),
           ),
         ),
-      ),
-    );
-  }
-
-  Future<void> _showUuidInfo() async {
-    await showDialog<void>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Код подписки'),
-        content: const Text('Код подписки сохраняется на устройстве.'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text('Понятно'),
-          ),
-        ],
       ),
     );
   }

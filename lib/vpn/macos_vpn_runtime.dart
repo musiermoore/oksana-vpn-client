@@ -6,7 +6,7 @@ import 'macos_daemon_tunnel_runtime.dart';
 import 'macos_proxy_runtime.dart';
 import 'vpn_runtime.dart';
 
-class MacosVpnRuntime implements VpnRuntime {
+class MacosVpnRuntime implements VpnRuntime, VpnConnectivityProbe {
   final MacosProxyRuntime _proxy = MacosProxyRuntime();
   final MacosDaemonTunnelRuntime _tunnel = MacosDaemonTunnelRuntime();
   final StreamController<VpnRuntimeSnapshot> _changes =
@@ -41,6 +41,19 @@ class MacosVpnRuntime implements VpnRuntime {
   @override
   bool supports(VpnMode mode) =>
       Platform.isMacOS && (_proxy.supports(mode) || _tunnel.supports(mode));
+
+  @override
+  Future<int> probeConnectivity(
+    SubscriptionProfile profile,
+    Uri testUri,
+  ) async {
+    final probeRuntime = MacosProxyRuntime();
+    try {
+      return await probeRuntime.probeConnectivity(profile, testUri);
+    } finally {
+      probeRuntime.dispose();
+    }
+  }
 
   @override
   Future<void> connect(SubscriptionProfile profile, VpnMode mode) async {

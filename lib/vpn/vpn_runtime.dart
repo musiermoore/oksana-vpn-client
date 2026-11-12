@@ -28,6 +28,10 @@ abstract interface class VpnRuntime {
   void dispose();
 }
 
+abstract interface class VpnConnectivityProbe {
+  Future<int> probeConnectivity(SubscriptionProfile profile, Uri testUri);
+}
+
 class VpnRuntimeException implements Exception {
   const VpnRuntimeException(this.message);
 
