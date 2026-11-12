@@ -4,6 +4,18 @@ class SubscriptionProfile {
   final Map<String, dynamic> configuration;
   final int index;
 
+  String? get stableId {
+    final value =
+        configuration['id'] ?? configuration['uuid'] ?? configuration['tag'];
+    return value is String && value.trim().isNotEmpty ? value.trim() : null;
+  }
+
+  String get favoriteKey {
+    final id = stableId;
+    if (id != null) return 'id:$id';
+    return 'fallback:$index:${name.trim().toLowerCase()}';
+  }
+
   String get name {
     final remarks = configuration['remarks'];
     if (remarks is String && remarks.trim().isNotEmpty) return remarks.trim();
@@ -20,7 +32,7 @@ class SubscriptionProfile {
       final name = value['name'];
       if (name is String && name.trim().isNotEmpty) return name.trim();
     }
-    return 'Без группы';
+    return 'Конфигурации';
   }
 
   String get groupKey {
@@ -32,8 +44,83 @@ class SubscriptionProfile {
       if (name is String && name.trim().isNotEmpty) {
         return 'name:${name.trim()}';
       }
+      if (value['is_default'] == true) return 'default';
     }
     return 'ungrouped';
+  }
+
+  String? get description {
+    final value = configuration['subtitle'] ??
+        configuration['shortDescription'] ??
+        configuration['description'];
+    return value is String && value.trim().isNotEmpty ? value.trim() : null;
+  }
+
+  int get sortOrder {
+    final value = configuration['sortOrder'] ??
+        configuration['sort'] ??
+        configuration['order'];
+    return value is num ? value.toInt() : index;
+  }
+
+  String? get groupDescription {
+    final value = configuration['group'];
+    if (value is! Map) return null;
+    final description = value['description'];
+    return description is String && description.trim().isNotEmpty
+        ? description.trim()
+        : null;
+  }
+
+  int get groupSortOrder {
+    final value = configuration['group'];
+    if (value is! Map) return 0;
+    final order = value['sort'] ?? value['sortOrder'] ?? value['order'];
+    return order is num ? order.toInt() : 0;
+  }
+
+  bool get groupIsDefault {
+    final value = configuration['group'];
+    return value is Map && value['is_default'] == true;
+  }
+
+  String? get groupIcon {
+    final value = configuration['group'];
+    final icon = value is Map ? value['icon'] : null;
+    return icon is String && icon.trim().isNotEmpty ? icon.trim() : null;
+  }
+
+  bool get groupExpandedByDefault {
+    final value = configuration['group'];
+    if (value is! Map) return true;
+    final expanded = value['defaultExpanded'] ?? value['expanded'];
+    return expanded is bool ? expanded : true;
+  }
+
+  String? get icon {
+    final value = configuration['icon'];
+    return value is String && value.trim().isNotEmpty ? value.trim() : null;
+  }
+
+  MapEntry<String, int>? get endpoint {
+    final outbounds = configuration['outbounds'];
+    if (outbounds is! List) return null;
+    for (final outbound in outbounds.whereType<Map>()) {
+      final settings = outbound['settings'];
+      if (settings is! Map) continue;
+      final candidates = [settings['vnext'], settings['servers']];
+      for (final candidateList in candidates) {
+        if (candidateList is! List) continue;
+        for (final candidate in candidateList.whereType<Map>()) {
+          final host = candidate['address'];
+          final port = candidate['port'];
+          if (host is String && host.isNotEmpty && port is num && port > 0) {
+            return MapEntry(host, port.toInt());
+          }
+        }
+      }
+    }
+    return null;
   }
 
   List<Map<String, dynamic>> get inbounds {
@@ -49,6 +136,13 @@ class SubscriptionProfile {
   Map<String, dynamic> toRuntimeConfiguration() {
     final runtimeConfiguration = Map<String, dynamic>.from(configuration)
       ..remove('group');
+    runtimeConfiguration.remove('shortDescription');
+    runtimeConfiguration.remove('description');
+    runtimeConfiguration.remove('subtitle');
+    runtimeConfiguration.remove('sortOrder');
+    runtimeConfiguration.remove('sort');
+    runtimeConfiguration.remove('order');
+    runtimeConfiguration.remove('icon');
     return runtimeConfiguration;
   }
 }
