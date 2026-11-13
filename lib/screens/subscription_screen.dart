@@ -54,17 +54,28 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
       }
       setState(() => _loading = true);
       await _continueWithToken(token);
-    } catch (_) {
+    } on AuthApiException catch (error) {
       if (mounted) {
-        try {
-          await _authStore.clear();
-        } catch (_) {
-          // Continue to the sign-in form if Keychain is temporarily unavailable.
+        if (error.message == 'Сессия истекла. Войдите снова.') {
+          try {
+            await _authStore.clear();
+          } catch (_) {
+            // Keep the expired token if Keychain is temporarily unavailable.
+          }
         }
         setState(() {
           _restoring = false;
           _loading = false;
-          _error = 'Сессия не восстановлена. Войдите снова.';
+          _error = error.message;
+        });
+      }
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          _restoring = false;
+          _loading = false;
+          _error =
+              'Сессия не восстановлена. Проверьте доступ к Keychain и повторите попытку.';
         });
       }
     }

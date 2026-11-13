@@ -18,17 +18,22 @@ class MainFlutterWindow: NSWindow {
     super.awakeFromNib()
 
     let initialContentSize = NSSize(width: 450, height: 800)
-    let minimumScale: CGFloat = 1.5
+    let minimumScale: CGFloat = 1.3
+    let minimumContentWidth = initialContentSize.width / minimumScale + 25
     let minimumContentSize = NSSize(
-      width: initialContentSize.width / minimumScale,
-      height: initialContentSize.height / minimumScale
+      width: minimumContentWidth,
+      height: minimumContentWidth * 16 / 9
     )
-    self.contentAspectRatio = NSSize(width: 9, height: 16)
     self.contentMinSize = minimumContentSize
     self.minSize = self.frameRect(
       forContentRect: NSRect(origin: .zero, size: minimumContentSize)
     ).size
-    self.setContentSize(initialContentSize)
-    self.center()
+
+    let frameAutosaveName = "OksanaVPNMainWindow"
+    _ = self.setFrameAutosaveName(frameAutosaveName)
+    if !self.setFrameUsingName(frameAutosaveName) {
+      self.setContentSize(initialContentSize)
+      self.center()
+    }
   }
 }

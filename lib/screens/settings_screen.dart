@@ -51,12 +51,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
             padding: const EdgeInsets.fromLTRB(16, 12, 16, 28),
             children: [
               Text(
-                'Подключение',
+                'Режим подключения',
                 style: theme.textTheme.titleMedium
                     ?.copyWith(fontWeight: FontWeight.w700),
               ),
               const SizedBox(height: 8),
               Card(
+                clipBehavior: Clip.antiAlias,
                 child: Column(
                   children: [
                     _VpnModeTile(
@@ -65,7 +66,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       enabled: widget.vpnModeEnabled,
                       onChanged: _selectVpnMode,
                     ),
-                    const Divider(height: 1, indent: 16, endIndent: 16),
+                    const Divider(height: 1),
                     _VpnModeTile(
                       mode: VpnMode.tun,
                       selectedMode: _vpnMode,
@@ -92,6 +93,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ),
               const SizedBox(height: 8),
               Card(
+                clipBehavior: Clip.antiAlias,
                 child: Column(
                   children: [
                     _ThemeModeTile(
@@ -99,13 +101,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       selectedMode: _themeMode,
                       onChanged: _selectThemeMode,
                     ),
-                    const Divider(height: 1, indent: 16, endIndent: 16),
+                    const Divider(height: 1),
                     _ThemeModeTile(
                       mode: ThemeMode.light,
                       selectedMode: _themeMode,
                       onChanged: _selectThemeMode,
                     ),
-                    const Divider(height: 1, indent: 16, endIndent: 16),
+                    const Divider(height: 1),
                     _ThemeModeTile(
                       mode: ThemeMode.dark,
                       selectedMode: _themeMode,
@@ -164,9 +166,9 @@ class _ThemeModeTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final (title, description) = switch (mode) {
-      ThemeMode.system => ('Как в системе', 'Следовать настройкам macOS.'),
-      ThemeMode.light => ('Светлая', 'Использовать светлую тему.'),
-      ThemeMode.dark => ('Тёмная', 'Использовать тёмную тему.'),
+      ThemeMode.system => ('Системная тема', 'Следовать настройкам macOS.'),
+      ThemeMode.light => ('Светлая тема', 'Использовать светлую тему.'),
+      ThemeMode.dark => ('Тёмная тема', 'Использовать тёмную тему.'),
     };
     return _SettingsOptionTile(
       title: title,
@@ -197,7 +199,11 @@ class _SettingsOptionTile extends StatelessWidget {
     final colors = Theme.of(context).colorScheme;
     return ListTile(
       enabled: enabled,
-      onTap: enabled && !selected ? onTap : null,
+      onTap: enabled
+          ? () {
+              if (!selected) onTap();
+            }
+          : null,
       contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
       leading: Icon(
         selected

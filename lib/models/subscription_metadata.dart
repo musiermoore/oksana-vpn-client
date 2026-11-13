@@ -9,6 +9,7 @@ class SubscriptionMetadata {
     this.updateInterval,
     this.webPageUrl,
     this.announceUrl,
+    this.telegramUrl,
     this.uploadBytes,
     this.downloadBytes,
     this.totalBytes,
@@ -22,6 +23,7 @@ class SubscriptionMetadata {
   final String? updateInterval;
   final String? webPageUrl;
   final String? announceUrl;
+  final String? telegramUrl;
   final int? uploadBytes;
   final int? downloadBytes;
   final int? totalBytes;
@@ -52,6 +54,9 @@ class SubscriptionMetadata {
       updateInterval: _header(headers, 'profile-update-interval'),
       webPageUrl: _header(headers, 'profile-web-page-url'),
       announceUrl: _header(headers, 'announce-url'),
+      telegramUrl: _header(headers, 'bot-url') ??
+          _header(headers, 'telegram-url') ??
+          _header(headers, 'profile-telegram-url'),
       uploadBytes: values['upload'],
       downloadBytes: values['download'],
       totalBytes: values['total'],

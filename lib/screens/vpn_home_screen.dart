@@ -765,44 +765,86 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
         final canUpdate = phase == VpnRuntimePhase.disconnected &&
             !_switchingServer &&
             !_refreshingSubscriptions;
+        final colors = Theme.of(context).colorScheme;
         return Scaffold(
-          body: SafeArea(
-            child: Align(
-              alignment: Alignment.topCenter,
-              child: ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 680),
-                child: switch (_selectedTab) {
-                  0 => _buildConnectionView(
-                      state: state,
-                      isBusy: isBusy,
-                      isRunning: isRunning,
+          body: Stack(
+            children: [
+              SafeArea(
+                child: Align(
+                  alignment: Alignment.topCenter,
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 680),
+                    child: switch (_selectedTab) {
+                      0 => _buildConnectionView(
+                          state: state,
+                          isBusy: isBusy,
+                          isRunning: isRunning,
+                        ),
+                      1 => _buildSubscriptionsView(canUpdate: canUpdate),
+                      _ => _buildProfileView(canUpdate: canUpdate),
+                    },
+                  ),
+                ),
+              ),
+              Positioned(
+                left: 0,
+                right: 0,
+                bottom: 0,
+                child: SafeArea(
+                  top: false,
+                  child: Padding(
+                    padding: const EdgeInsets.only(bottom: 6),
+                    child: SizedBox(
+                      height: 42,
+                      child: Center(
+                        child: FittedBox(
+                          fit: BoxFit.scaleDown,
+                          child: Material(
+                            color: colors.surface,
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(24),
+                              side: BorderSide(color: colors.outlineVariant),
+                            ),
+                            child: Padding(
+                              padding: const EdgeInsets.all(4),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  _CompactNavItem(
+                                    icon: Icons.home_outlined,
+                                    selectedIcon: Icons.home_rounded,
+                                    label: 'Главная',
+                                    selected: _selectedTab == 0,
+                                    onTap: () =>
+                                        setState(() => _selectedTab = 0),
+                                  ),
+                                  const SizedBox(width: 4),
+                                  _CompactNavItem(
+                                    icon: Icons.credit_card_outlined,
+                                    selectedIcon: Icons.credit_card_rounded,
+                                    label: 'Подписки',
+                                    selected: _selectedTab == 1,
+                                    onTap: () =>
+                                        setState(() => _selectedTab = 1),
+                                  ),
+                                  const SizedBox(width: 4),
+                                  _CompactNavItem(
+                                    icon: Icons.person_outline_rounded,
+                                    selectedIcon: Icons.person_rounded,
+                                    label: 'Профиль',
+                                    selected: _selectedTab == 2,
+                                    onTap: () =>
+                                        setState(() => _selectedTab = 2),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
                     ),
-                  1 => _buildSubscriptionsView(canUpdate: canUpdate),
-                  _ => _buildProfileView(canUpdate: canUpdate),
-                },
-              ),
-            ),
-          ),
-          bottomNavigationBar: NavigationBar(
-            height: 68,
-            selectedIndex: _selectedTab,
-            onDestinationSelected: (index) =>
-                setState(() => _selectedTab = index),
-            destinations: const [
-              NavigationDestination(
-                icon: Icon(Icons.home_outlined),
-                selectedIcon: Icon(Icons.home_rounded),
-                label: 'Главная',
-              ),
-              NavigationDestination(
-                icon: Icon(Icons.credit_card_outlined),
-                selectedIcon: Icon(Icons.credit_card_rounded),
-                label: 'Подписки',
-              ),
-              NavigationDestination(
-                icon: Icon(Icons.person_outline_rounded),
-                selectedIcon: Icon(Icons.person_rounded),
-                label: 'Профиль',
+                  ),
+                ),
               ),
             ],
           ),
@@ -818,9 +860,8 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
   }) {
     final theme = Theme.of(context);
     final canConnect = _runtime.supports(_selectedMode);
-    final subscriptions = _subscriptionSets();
     return SingleChildScrollView(
-      padding: const EdgeInsets.fromLTRB(10, 8, 10, 28),
+      padding: const EdgeInsets.fromLTRB(10, 8, 10, 72),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -892,15 +933,11 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
           ),
           const SizedBox(height: 12),
           _buildSelectedSubscriptionPanel(
-            subscriptions: subscriptions,
             canRefresh: state.phase == VpnRuntimePhase.disconnected &&
                 !_switchingServer &&
                 !_refreshingSubscriptions &&
                 !_loadingExternal,
-          ),
-          const SizedBox(height: 12),
-          _buildConfigurationList(
-            enabled: !isBusy && !_switchingServer && !_pinging,
+            configurationsEnabled: !isBusy && !_switchingServer && !_pinging,
             isRunning: isRunning,
           ),
           if (state.phase == VpnRuntimePhase.error &&
@@ -985,144 +1022,110 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
     final groups = _sortedProfileGroups();
     final favorites = _profiles.where(_isFavorite).toList()
       ..sort((a, b) => a.sortOrder.compareTo(b.sortOrder));
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(16, 10, 16, 12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Row(children: [
-              Expanded(
-                  child: Text('Доступные подключения',
-                      style: Theme.of(context)
-                          .textTheme
-                          .titleMedium
-                          ?.copyWith(fontWeight: FontWeight.w700))),
-              Text('${_profiles.length} доступно',
-                  style: Theme.of(context).textTheme.bodySmall),
-              const SizedBox(width: 4),
-              IconButton(
-                tooltip: _pingingAll
-                    ? 'Проверяем все подключения…'
-                    : 'Проверить доступность всех серверов через профиль',
-                visualDensity: VisualDensity.compact,
-                onPressed: _profiles.isEmpty || _pingingAll || _pinging
-                    ? null
-                    : () => unawaited(_pingAllProfiles()),
-                icon: _pingingAll
-                    ? const SizedBox(
-                        width: 18,
-                        height: 18,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    : const Icon(Icons.speed_rounded),
-              ),
-            ]),
-            if (_profiles.isEmpty)
-              Padding(
-                padding: const EdgeInsets.only(top: 12, bottom: 4),
-                child: Text(_primarySubscriptionError ??
-                    'Выберите подписку с доступными конфигурациями.'),
-              ),
-            if (favorites.isNotEmpty) ...[
-              Padding(
-                padding: const EdgeInsets.only(top: 8),
-                child: Material(
-                  color: Colors.transparent,
-                  borderRadius: BorderRadius.circular(12),
-                  child: InkWell(
-                    borderRadius: BorderRadius.circular(12),
-                    splashFactory: NoSplash.splashFactory,
-                    mouseCursor: SystemMouseCursors.click,
-                    overlayColor: WidgetStateProperty.resolveWith((states) {
-                      final colors = Theme.of(context).colorScheme;
-                      if (states.contains(WidgetState.pressed)) {
-                        return colors.primary.withValues(alpha: 0.08);
-                      }
-                      if (states.contains(WidgetState.hovered)) {
-                        return colors.onSurface.withValues(alpha: 0.045);
-                      }
-                      if (states.contains(WidgetState.focused)) {
-                        return colors.primary.withValues(alpha: 0.05);
-                      }
-                      return Colors.transparent;
-                    }),
-                    onTap: () => setState(
-                        () => _favoritesExpanded = !_favoritesExpanded),
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 8, vertical: 6),
-                      child: Row(children: [
-                        Icon(Icons.star_rounded,
-                            size: 17,
-                            color: Theme.of(context).colorScheme.primary),
-                        const SizedBox(width: 6),
-                        Text('Избранное',
-                            style: Theme.of(context)
-                                .textTheme
-                                .bodyMedium
-                                ?.copyWith(fontWeight: FontWeight.w600)),
-                        const Spacer(),
-                        Text('${favorites.length}',
-                            style: Theme.of(context).textTheme.labelSmall),
-                        const SizedBox(width: 6),
-                        Icon(
-                          _favoritesExpanded
-                              ? Icons.expand_less
-                              : Icons.expand_more,
-                          size: 18,
-                          color: Theme.of(context).colorScheme.onSurfaceVariant,
-                        ),
-                      ]),
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (_profiles.isEmpty)
+          Padding(
+            padding: const EdgeInsets.only(top: 12, bottom: 4),
+            child: Text(_primarySubscriptionError ??
+                'Выберите подписку с доступными конфигурациями.'),
+          ),
+        if (favorites.isNotEmpty) ...[
+          Padding(
+            padding: const EdgeInsets.only(top: 8),
+            child: Material(
+              color: Colors.transparent,
+              borderRadius: BorderRadius.circular(12),
+              child: InkWell(
+                borderRadius: BorderRadius.circular(12),
+                splashFactory: NoSplash.splashFactory,
+                mouseCursor: SystemMouseCursors.click,
+                overlayColor: WidgetStateProperty.resolveWith((states) {
+                  final colors = Theme.of(context).colorScheme;
+                  if (states.contains(WidgetState.pressed)) {
+                    return colors.primary.withValues(alpha: 0.08);
+                  }
+                  if (states.contains(WidgetState.hovered)) {
+                    return colors.onSurface.withValues(alpha: 0.045);
+                  }
+                  if (states.contains(WidgetState.focused)) {
+                    return colors.primary.withValues(alpha: 0.05);
+                  }
+                  return Colors.transparent;
+                }),
+                onTap: () =>
+                    setState(() => _favoritesExpanded = !_favoritesExpanded),
+                child: Padding(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                  child: Row(children: [
+                    Icon(Icons.star_rounded,
+                        size: 17, color: Theme.of(context).colorScheme.primary),
+                    const SizedBox(width: 6),
+                    Text('Избранное',
+                        style: Theme.of(context)
+                            .textTheme
+                            .bodyMedium
+                            ?.copyWith(fontWeight: FontWeight.w600)),
+                    const Spacer(),
+                    Text('${favorites.length}',
+                        style: Theme.of(context).textTheme.labelSmall),
+                    const SizedBox(width: 6),
+                    Icon(
+                      _favoritesExpanded
+                          ? Icons.expand_less
+                          : Icons.expand_more,
+                      size: 18,
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
                     ),
-                  ),
+                  ]),
                 ),
               ),
-              if (_favoritesExpanded)
-                ..._configurationRows(
-                  favorites,
-                  enabled: enabled,
-                  favoriteEnabled: !_savingFavorites,
-                  isRunning: isRunning,
-                ),
+            ),
+          ),
+          if (_favoritesExpanded)
+            ..._configurationRows(
+              favorites,
+              enabled: enabled,
+              favoriteEnabled: !_savingFavorites,
+              isRunning: isRunning,
+            ),
+          const SizedBox(height: 8),
+          const Divider(
+            height: 1,
+            thickness: 1,
+            color: Color(0xFFE7E7EA),
+          ),
+        ],
+        if (groups.length == 1 && groups.single.first.groupKey == 'ungrouped')
+          ..._configurationRows(
+            groups.single,
+            enabled: enabled,
+            favoriteEnabled: !_savingFavorites,
+            isRunning: isRunning,
+          )
+        else
+          for (var i = 0; i < groups.length; i++) ...[
+            if (i == 0)
+              const SizedBox(height: 8)
+            else ...[
               const SizedBox(height: 8),
               const Divider(
                 height: 1,
                 thickness: 1,
                 color: Color(0xFFE7E7EA),
               ),
+              const SizedBox(height: 8),
             ],
-            if (groups.length == 1 &&
-                groups.single.first.groupKey == 'ungrouped')
-              ..._configurationRows(
-                groups.single,
-                enabled: enabled,
-                favoriteEnabled: !_savingFavorites,
-                isRunning: isRunning,
-              )
-            else
-              for (var i = 0; i < groups.length; i++) ...[
-                if (i == 0)
-                  const SizedBox(height: 8)
-                else ...[
-                  const SizedBox(height: 8),
-                  const Divider(
-                    height: 1,
-                    thickness: 1,
-                    color: Color(0xFFE7E7EA),
-                  ),
-                  const SizedBox(height: 8),
-                ],
-                _configurationGroup(
-                  groups[i],
-                  enabled: enabled,
-                  favoriteEnabled: !_savingFavorites,
-                  isRunning: isRunning,
-                ),
-              ],
+            _configurationGroup(
+              groups[i],
+              enabled: enabled,
+              favoriteEnabled: !_savingFavorites,
+              isRunning: isRunning,
+            ),
           ],
-        ),
-      ),
+      ],
     );
   }
 
@@ -1222,8 +1225,6 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
                             ],
                           ),
                         ),
-                        Text('${profiles.length}',
-                            style: Theme.of(context).textTheme.labelSmall),
                         const SizedBox(width: 6),
                         Icon(expanded ? Icons.expand_less : Icons.expand_more,
                             size: 18,
@@ -1253,7 +1254,7 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
     final sets = _subscriptionSets();
     final canModify = canUpdate && !_loadingExternal;
     return ListView(
-      padding: const EdgeInsets.fromLTRB(8, 20, 8, 24),
+      padding: const EdgeInsets.fromLTRB(8, 20, 8, 72),
       children: [
         Row(children: [
           Expanded(
@@ -1332,14 +1333,18 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
                     color: Theme.of(context).colorScheme.primary),
               if (!selected) const Icon(Icons.chevron_right_rounded),
             ]),
-            if (metadata.uploadBytes != null ||
+            if (own ||
+                metadata.uploadBytes != null ||
                 metadata.downloadBytes != null ||
                 metadata.totalBytes != null ||
                 metadata.devicesUsed != null ||
                 metadata.devicesLimit != null ||
                 metadata.expiresAt != null) ...[
               const Divider(height: 20),
-              _subscriptionMetadataLines(metadata),
+              _subscriptionMetadataLines(
+                metadata,
+                isPrimarySubscription: own,
+              ),
             ],
             if (profiles.isEmpty)
               const Padding(
@@ -1352,59 +1357,40 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
   }
 
   Widget _buildSelectedSubscriptionPanel({
-    required Map<String, List<SubscriptionProfile>> subscriptions,
     required bool canRefresh,
+    required bool configurationsEnabled,
+    required bool isRunning,
   }) {
     final theme = Theme.of(context);
     final metadata = _metadataFor(_activeSubscriptionKey);
+    String subscriptionTitle(String key) {
+      if (key == 'oksana' && widget.authToken != null) {
+        return 'Подписка Oksana VPN';
+      }
+      return _metadataFor(key).title ?? _subscriptionName(key);
+    }
+
     final activeName = _activeSubscriptionKey == null
         ? 'Нет выбранной подписки'
-        : _subscriptionName(_activeSubscriptionKey!);
+        : subscriptionTitle(_activeSubscriptionKey!);
 
     return Card(
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        padding: const EdgeInsets.fromLTRB(16, 12, 16, 14),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             Row(
               children: [
                 Expanded(
-                  child: subscriptions.length > 1
-                      ? DropdownButtonHideUnderline(
-                          child: DropdownButton<String>(
-                            value: subscriptions
-                                    .containsKey(_activeSubscriptionKey)
-                                ? _activeSubscriptionKey
-                                : subscriptions.keys.first,
-                            isExpanded: true,
-                            icon: const Icon(Icons.expand_more_rounded),
-                            items: [
-                              for (final key in subscriptions.keys)
-                                DropdownMenuItem<String>(
-                                  value: key,
-                                  child: Text(
-                                    _subscriptionName(key),
-                                    overflow: TextOverflow.ellipsis,
-                                  ),
-                                ),
-                            ],
-                            onChanged: _switchingServer
-                                ? null
-                                : (key) {
-                                    if (key != null) {
-                                      unawaited(_selectSubscription(key));
-                                    }
-                                  },
-                          ),
-                        )
-                      : Text(
-                          metadata.title ?? activeName,
-                          overflow: TextOverflow.ellipsis,
-                          style: theme.textTheme.titleMedium
-                              ?.copyWith(fontWeight: FontWeight.w700),
-                        ),
+                  child: Text(
+                    activeName,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.titleMedium
+                        ?.copyWith(fontWeight: FontWeight.w700),
+                  ),
                 ),
+                const SizedBox(width: 4),
                 IconButton(
                   tooltip: _refreshingSubscriptions
                       ? 'Обновляем подписки…'
@@ -1424,11 +1410,60 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
                         )
                       : const Icon(Icons.refresh_rounded),
                 ),
+                const SizedBox(width: 4),
+                IconButton(
+                  tooltip: _pingingAll
+                      ? 'Проверяем все подключения…'
+                      : 'Проверить доступность всех серверов через профиль',
+                  visualDensity: VisualDensity.compact,
+                  constraints:
+                      const BoxConstraints.tightFor(width: 36, height: 36),
+                  padding: EdgeInsets.zero,
+                  onPressed: _profiles.isEmpty || _pingingAll || _pinging
+                      ? null
+                      : () => unawaited(_pingAllProfiles()),
+                  icon: _pingingAll
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.speed_rounded),
+                ),
+                const SizedBox(width: 4),
+                PopupMenuButton<String>(
+                  tooltip: 'Ещё',
+                  borderRadius: BorderRadius.circular(20),
+                  child: const SizedBox(
+                    width: 36,
+                    height: 36,
+                    child: Icon(Icons.more_vert_rounded, size: 20),
+                  ),
+                  onSelected: (value) {
+                    if (value == 'subscriptions') {
+                      setState(() => _selectedTab = 1);
+                    }
+                  },
+                  itemBuilder: (context) => const [
+                    PopupMenuItem<String>(
+                      value: 'subscriptions',
+                      child: Row(
+                        children: [
+                          Icon(Icons.credit_card_outlined, size: 18),
+                          SizedBox(width: 10),
+                          Text('Управлять подписками'),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
               ],
             ),
-            if (metadata.updateInterval != null ||
+            if (_activeSubscriptionKey == 'oksana' ||
+                metadata.updateInterval != null ||
                 metadata.webPageUrl != null ||
                 metadata.announceUrl != null ||
+                metadata.telegramUrl != null ||
                 metadata.supportUrl != null ||
                 metadata.devicesLimit != null ||
                 metadata.devicesUsed != null ||
@@ -1437,7 +1472,10 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
                 metadata.uploadBytes != null ||
                 metadata.downloadBytes != null) ...[
               const SizedBox(height: 10),
-              _subscriptionMetadataLines(metadata),
+              _subscriptionMetadataLines(
+                metadata,
+                isPrimarySubscription: _activeSubscriptionKey == 'oksana',
+              ),
             ],
             if (_subscriptionError != null) ...[
               const SizedBox(height: 8),
@@ -1445,92 +1483,172 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
                   style: theme.textTheme.bodySmall
                       ?.copyWith(color: theme.colorScheme.error)),
             ],
+            const SizedBox(height: 8),
+            const Divider(height: 1),
+            _buildConfigurationList(
+              enabled: configurationsEnabled,
+              isRunning: isRunning,
+            ),
           ],
         ),
       ),
     );
   }
 
-  Widget _subscriptionMetadataLines(SubscriptionMetadata metadata) {
-    final items = <Widget>[];
-    if (metadata.uploadBytes != null) {
-      items.add(_metadataChip(
-        Icons.north_east_rounded,
-        'Исходящий трафик',
-        _formatBytes(metadata.uploadBytes!),
-      ));
-    }
-    if (metadata.downloadBytes != null) {
-      items.add(_metadataChip(
-        Icons.south_west_rounded,
-        'Входящий трафик',
-        _formatBytes(metadata.downloadBytes!),
-      ));
-    }
-    if (metadata.totalBytes != null) {
-      items.add(_metadataChip(
-        Icons.data_usage_rounded,
-        'Лимит трафика',
-        metadata.totalBytes == 0 ? '∞' : _formatBytes(metadata.totalBytes!),
-      ));
-    }
+  Widget _subscriptionMetadataLines(
+    SubscriptionMetadata metadata, {
+    bool isPrimarySubscription = false,
+  }) {
+    final hasTrafficData = metadata.uploadBytes != null ||
+        metadata.downloadBytes != null ||
+        metadata.totalBytes != null;
+    final details = <Widget>[];
+    final links = <Widget>[];
     if (metadata.expiresAt != null && metadata.expiresAt! > 0) {
       final date = DateTime.fromMillisecondsSinceEpoch(
         metadata.expiresAt! * 1000,
       ).toLocal();
-      items.add(_metadataChip(
+      details.add(_metadataChip(
         Icons.event_available_rounded,
         'Действует до',
         '${date.day.toString().padLeft(2, '0')}.${date.month.toString().padLeft(2, '0')}.${date.year}',
       ));
     }
     if (metadata.devicesLimit != null || metadata.devicesUsed != null) {
-      items.add(_metadataChip(
+      details.add(_metadataChip(
         Icons.devices_rounded,
         'Устройства',
         '${metadata.devicesUsed ?? 0}/${metadata.devicesLimit ?? '∞'}',
       ));
     }
     if (metadata.refreshInterval != null) {
-      items.add(_metadataChip(
+      details.add(_metadataChip(
         Icons.autorenew_rounded,
         'Автообновление',
         '${metadata.refreshInterval!.inHours} ч',
       ));
     } else if (metadata.updateInterval != null) {
-      items.add(_metadataChip(
+      details.add(_metadataChip(
         Icons.autorenew_rounded,
         'Интервал обновления',
         metadata.updateInterval!,
       ));
     }
     if (metadata.webPageUrl != null) {
-      items.add(_metadataLink(
+      links.add(_metadataLink(
         icon: Icons.language_rounded,
-        tooltip: 'Открыть сайт подписки',
+        label: 'Сайт',
         url: metadata.webPageUrl!,
       ));
     }
+    final telegramUrl = metadata.telegramUrl ??
+        (isPrimarySubscription ? 'https://t.me/OksanaVpnBot' : null);
+    if (telegramUrl != null) {
+      links.add(_metadataLink(
+        icon: Icons.send_rounded,
+        label: 'Бот',
+        url: telegramUrl,
+      ));
+    }
     if (metadata.supportUrl != null) {
-      items.add(_metadataLink(
+      links.add(_metadataLink(
         icon: Icons.support_agent_rounded,
-        tooltip: 'Открыть поддержку',
+        label: 'Помощь',
         url: metadata.supportUrl!,
       ));
     }
     if (metadata.announceUrl != null) {
-      items.add(_metadataLink(
+      links.add(_metadataLink(
         icon: Icons.campaign_outlined,
-        tooltip: 'Открыть канал объявлений',
+        label: 'Новости',
         url: metadata.announceUrl!,
       ));
     }
 
-    return Wrap(
-      spacing: 14,
-      runSpacing: 8,
-      crossAxisAlignment: WrapCrossAlignment.center,
-      children: items,
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (hasTrafficData) _trafficUsage(metadata),
+        if (details.isNotEmpty) ...[
+          if (hasTrafficData) const SizedBox(height: 6),
+          Wrap(
+            spacing: 14,
+            runSpacing: 8,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: details,
+          ),
+        ],
+        if (links.isNotEmpty) ...[
+          if (hasTrafficData || details.isNotEmpty) const SizedBox(height: 6),
+          Wrap(
+            spacing: 2,
+            runSpacing: 2,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: links,
+          ),
+        ],
+      ],
+    );
+  }
+
+  Widget _trafficUsage(SubscriptionMetadata metadata) {
+    final theme = Theme.of(context);
+    final colors = theme.colorScheme;
+    final uploaded = metadata.uploadBytes ?? 0;
+    final downloaded = metadata.downloadBytes ?? 0;
+    final used = uploaded + downloaded;
+    final limit = metadata.totalBytes;
+    final hasLimit = limit != null && limit > 0;
+    final limitLabel = hasLimit ? _formatBytes(limit!) : '∞';
+    final ratio = hasLimit ? (used / limit!).clamp(0.0, 1.0).toDouble() : 0.0;
+
+    return Tooltip(
+      message:
+          'Отправлено: ${_formatBytes(uploaded)}\nПолучено: ${_formatBytes(downloaded)}',
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(6),
+        child: SizedBox(
+          height: 21,
+          child: LayoutBuilder(
+            builder: (context, constraints) => Stack(
+              fit: StackFit.expand,
+              children: [
+                ColoredBox(color: colors.surfaceContainerHighest),
+                if (ratio > 0)
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: SizedBox(
+                      width: constraints.maxWidth * ratio,
+                      child: DecoratedBox(
+                        decoration: BoxDecoration(
+                          gradient: LinearGradient(
+                            begin: Alignment.centerLeft,
+                            end: Alignment.centerRight,
+                            colors: [
+                              colors.onSurfaceVariant.withValues(alpha: 0.45),
+                              colors.onSurfaceVariant.withValues(alpha: 0.2),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                Center(
+                  child: Text(
+                    '${_formatBytes(used)} / $limitLabel',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.labelSmall?.copyWith(
+                      color: colors.onSurface,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
     );
   }
 
@@ -1553,17 +1671,34 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
 
   Widget _metadataLink({
     required IconData icon,
-    required String tooltip,
+    required String label,
     required String url,
   }) {
-    return IconButton(
-      tooltip: tooltip,
-      visualDensity: VisualDensity.compact,
-      constraints: const BoxConstraints.tightFor(width: 36, height: 36),
-      padding: const EdgeInsets.all(4),
-      splashRadius: 18,
-      onPressed: () => unawaited(_openExternalLink(url)),
-      icon: Icon(icon, size: 19),
+    return Transform.translate(
+      offset: const Offset(-6, 0),
+      child: TextButton(
+        onPressed: () => unawaited(_openExternalLink(url)),
+        style: TextButton.styleFrom(
+          visualDensity: VisualDensity.compact,
+          padding: const EdgeInsets.only(left: 6, right: 10, top: 6, bottom: 6),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          mainAxisAlignment: MainAxisAlignment.start,
+          children: [
+            Icon(icon, size: 17),
+            const SizedBox(width: 4),
+            Text(
+              label,
+              textAlign: TextAlign.left,
+              style: Theme.of(context)
+                  .textTheme
+                  .labelMedium
+                  ?.copyWith(fontSize: 12),
+            ),
+          ],
+        ),
+      ),
     );
   }
 
@@ -1715,6 +1850,96 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
       VpnRuntimePhase.error => 'Не удалось подключиться',
       VpnRuntimePhase.disconnected => 'Не подключено',
     };
+  }
+}
+
+class _CompactNavItem extends StatefulWidget {
+  const _CompactNavItem({
+    required this.icon,
+    required this.selectedIcon,
+    required this.label,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final IconData icon;
+  final IconData selectedIcon;
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  State<_CompactNavItem> createState() => _CompactNavItemState();
+}
+
+class _CompactNavItemState extends State<_CompactNavItem> {
+  bool _hovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    final emphasized = widget.selected || _hovered;
+    final foreground = widget.selected
+        ? colors.primary
+        : _hovered
+            ? colors.onSurface
+            : colors.onSurfaceVariant;
+
+    return Semantics(
+      label: widget.label,
+      button: true,
+      selected: widget.selected,
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: widget.onTap,
+          onHover: (hovered) {
+            if (_hovered != hovered) setState(() => _hovered = hovered);
+          },
+          mouseCursor: SystemMouseCursors.click,
+          borderRadius: BorderRadius.circular(20),
+          splashColor: Colors.transparent,
+          highlightColor: Colors.transparent,
+          hoverColor: Colors.transparent,
+          focusColor: Colors.transparent,
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 160),
+            curve: Curves.easeOut,
+            padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+            decoration: BoxDecoration(
+              border: Border.all(
+                color: !emphasized
+                    ? Colors.transparent
+                    : widget.selected
+                        ? colors.primary
+                        : colors.outlineVariant,
+              ),
+              borderRadius: BorderRadius.circular(20),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  widget.selected ? widget.selectedIcon : widget.icon,
+                  size: 18,
+                  color: foreground,
+                ),
+                const SizedBox(width: 6),
+                Text(
+                  widget.label,
+                  maxLines: 1,
+                  style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                        color: foreground,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                      ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
   }
 }
 

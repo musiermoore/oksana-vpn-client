@@ -1,14 +1,13 @@
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'secure_app_state_store.dart';
 
 class AuthStore {
   const AuthStore();
   static const _tokenKey = 'auth_bearer_token';
-  static const _storage = FlutterSecureStorage(
-    mOptions: MacOsOptions(usesDataProtectionKeychain: false),
-  );
-
-  Future<String?> readToken() => _storage.read(key: _tokenKey);
+  Future<String?> readToken() => SecureAppStateStore.read(_tokenKey);
   Future<void> saveToken(String token) =>
-      _storage.write(key: _tokenKey, value: token);
-  Future<void> clear() => _storage.delete(key: _tokenKey);
+      SecureAppStateStore.write(_tokenKey, token);
+  Future<void> clear() async {
+    await SecureAppStateStore.delete(_tokenKey);
+    await SecureAppStateStore.deletePreviousState();
+  }
 }
