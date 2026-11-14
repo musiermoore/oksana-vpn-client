@@ -511,9 +511,24 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
 
   Future<void> _pingAllProfiles() async {
     if (_pingingAll || _profiles.isEmpty || _pingingProfiles.isNotEmpty) return;
-    final profiles = List<SubscriptionProfile>.of(_profiles);
+    setState(() => _pingingAll = true);
+    try {
+      await _pingProfiles(List<SubscriptionProfile>.of(_profiles));
+    } finally {
+      if (mounted) setState(() => _pingingAll = false);
+    }
+  }
+
+  Future<void> _pingGroupProfiles(
+    List<SubscriptionProfile> profiles,
+  ) async {
+    if (_pingingAll || _pingingProfiles.isNotEmpty) return;
+    await _pingProfiles(profiles);
+  }
+
+  Future<void> _pingProfiles(List<SubscriptionProfile> profiles) async {
+    if (profiles.isEmpty || profiles.any(_pingingProfiles.contains)) return;
     setState(() {
-      _pingingAll = true;
       _pingingProfiles.addAll(profiles);
       for (final profile in profiles) {
         _pingResults.remove(profile);
@@ -531,14 +546,11 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
     }
 
     final workerCount = profiles.length < 3 ? profiles.length : 3;
-    await Future.wait(List.generate(workerCount, (_) => worker()));
-    if (mounted) {
-      setState(() {
-        _pingingProfiles.removeAll(profiles);
-        _pingingAll = false;
-      });
-    } else {
+    try {
+      await Future.wait(List.generate(workerCount, (_) => worker()));
+    } finally {
       _pingingProfiles.removeAll(profiles);
+      if (mounted) setState(() {});
     }
   }
 
@@ -1168,6 +1180,7 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
     final key = first.groupKey;
     final expanded = _expandedServerGroups[key] ?? first.groupExpandedByDefault;
     final colors = Theme.of(context).colorScheme;
+    final groupPinging = profiles.any(_pingingProfiles.contains);
     return Column(children: [
       LayoutBuilder(
         builder: (context, constraints) {
@@ -1224,6 +1237,19 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
                                         Theme.of(context).textTheme.bodySmall),
                             ],
                           ),
+                        ),
+                        IconButton(
+                          tooltip: 'Проверить серверы категории',
+                          visualDensity: VisualDensity.compact,
+                          constraints: const BoxConstraints.tightFor(
+                              width: 32, height: 32),
+                          padding: EdgeInsets.zero,
+                          onPressed: enabled && !groupPinging
+                              ? () => unawaited(_pingGroupProfiles(profiles))
+                              : null,
+                          icon: groupPinging
+                              ? const _PingLoadingIcon(size: 16)
+                              : const Icon(Icons.speed_rounded, size: 18),
                         ),
                         const SizedBox(width: 6),
                         Icon(expanded ? Icons.expand_less : Icons.expand_more,
@@ -1423,11 +1449,7 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
                       ? null
                       : () => unawaited(_pingAllProfiles()),
                   icon: _pingingAll
-                      ? const SizedBox(
-                          width: 18,
-                          height: 18,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
+                      ? const _PingLoadingIcon(size: 18)
                       : const Icon(Icons.speed_rounded),
                 ),
                 const SizedBox(width: 4),
@@ -2012,6 +2034,21 @@ class _PowerControl extends StatelessWidget {
   }
 }
 
+class _PingLoadingIcon extends StatelessWidget {
+  const _PingLoadingIcon({required this.size});
+
+  final double size;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 2),
+        child: SizedBox.square(
+          dimension: size,
+          child: const CircularProgressIndicator(strokeWidth: 2),
+        ),
+      );
+}
+
 class _ServerOption extends StatelessWidget {
   const _ServerOption({
     required this.profile,
@@ -2109,16 +2146,7 @@ class _ServerOption extends StatelessWidget {
                     ),
                   ),
                 ),
-              if (pinging)
-                const Padding(
-                  padding: EdgeInsets.only(right: 8),
-                  child: SizedBox(
-                    width: 14,
-                    height: 14,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  ),
-                )
-              else if (pingMs != null)
+              if (!pinging && pingMs != null)
                 Padding(
                   padding: const EdgeInsets.only(right: 4),
                   child: Text(
@@ -2133,7 +2161,9 @@ class _ServerOption extends StatelessWidget {
                 tooltip: 'Проверить доступность через профиль',
                 visualDensity: VisualDensity.compact,
                 onPressed: enabled && !pinging ? onPing : null,
-                icon: const Icon(Icons.speed_rounded, size: 18),
+                icon: pinging
+                    ? const _PingLoadingIcon(size: 16)
+                    : const Icon(Icons.speed_rounded, size: 18),
               ),
               IconButton(
                 tooltip:
