@@ -12,9 +12,29 @@ class AuthApiException implements Exception {
 }
 
 class AuthProfile {
-  const AuthProfile({required this.uuid, required this.name});
+  const AuthProfile({
+    required this.uuid,
+    required this.name,
+    this.telegram,
+    this.telegramId,
+    this.hasActiveAccess,
+    this.subscriptionExpiresAt,
+    this.balance = 0,
+    this.debt = 0,
+    this.hasMoneyForNextSubscriptionMonth,
+    this.totalDiscountPercent = 0,
+  });
+
   final String uuid;
   final String name;
+  final String? telegram;
+  final String? telegramId;
+  final bool? hasActiveAccess;
+  final DateTime? subscriptionExpiresAt;
+  final double balance;
+  final double debt;
+  final bool? hasMoneyForNextSubscriptionMonth;
+  final double totalDiscountPercent;
 }
 
 class AuthApi {
@@ -129,9 +149,27 @@ class AuthApi {
           (decoded['uuid'] as String).isEmpty) {
         throw const AuthApiException('В профиле не найден UUID подписки.');
       }
+      final referral = decoded['referral'];
       return AuthProfile(
-          uuid: decoded['uuid'] as String,
-          name: decoded['name'] is String ? decoded['name'] as String : '');
+        uuid: decoded['uuid'] as String,
+        name: decoded['name'] is String ? decoded['name'] as String : '',
+        telegram: _readString(decoded['telegram']),
+        telegramId: _readDisplayString(decoded['telegram_id']),
+        hasActiveAccess: decoded['has_active_access'] is bool
+            ? decoded['has_active_access'] as bool
+            : null,
+        subscriptionExpiresAt:
+            _readDateTime(decoded['subscription_expires_at']),
+        balance: _readNumber(decoded['balance']) ?? 0,
+        debt: _readNumber(decoded['debt']) ?? 0,
+        hasMoneyForNextSubscriptionMonth:
+            decoded['has_money_for_next_subscription_month'] is bool
+                ? decoded['has_money_for_next_subscription_month'] as bool
+                : null,
+        totalDiscountPercent: referral is Map
+            ? _readNumber(referral['total_discount_percent']) ?? 0
+            : 0,
+      );
     } on AuthApiException {
       rethrow;
     } on SocketException {
@@ -144,6 +182,31 @@ class AuthApi {
       throw const AuthApiException(
           'Не удалось загрузить профиль. Попробуйте ещё раз.');
     }
+  }
+
+  static String? _readString(Object? value) {
+    if (value is! String) return null;
+    final trimmed = value.trim();
+    return trimmed.isEmpty ? null : trimmed;
+  }
+
+  static String? _readDisplayString(Object? value) {
+    if (value is String || value is num) {
+      final trimmed = value.toString().trim();
+      return trimmed.isEmpty ? null : trimmed;
+    }
+    return null;
+  }
+
+  static double? _readNumber(Object? value) {
+    if (value is num) return value.toDouble();
+    if (value is String) return double.tryParse(value.trim());
+    return null;
+  }
+
+  static DateTime? _readDateTime(Object? value) {
+    if (value is! String || value.trim().isEmpty) return null;
+    return DateTime.tryParse(value.trim());
   }
 
   Future<void> logout(String token) async {

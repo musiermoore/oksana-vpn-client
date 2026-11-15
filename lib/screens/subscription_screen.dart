@@ -184,6 +184,7 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
           themeMode: widget.themeMode,
           onThemeModeChanged: widget.onThemeModeChanged,
           authToken: token,
+          accountProfile: profile,
           primarySubscriptionError: primarySubscriptionError,
           primaryMetadata: primaryMetadata,
         ),

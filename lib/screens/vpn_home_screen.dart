@@ -36,6 +36,7 @@ class VpnHomeScreen extends StatefulWidget {
     required this.themeMode,
     required this.onThemeModeChanged,
     this.authToken,
+    this.accountProfile,
     this.primarySubscriptionError,
     this.primaryMetadata = const SubscriptionMetadata(),
     this.initialTab = 0,
@@ -46,6 +47,7 @@ class VpnHomeScreen extends StatefulWidget {
   final ThemeMode themeMode;
   final ValueChanged<ThemeMode> onThemeModeChanged;
   final String? authToken;
+  final AuthProfile? accountProfile;
   final String? primarySubscriptionError;
   final SubscriptionMetadata primaryMetadata;
   final int initialTab;
@@ -94,6 +96,9 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
   bool _loadingExternal = false;
   String? _externalError;
   String? _primarySubscriptionError;
+  late AuthProfile? _accountProfile = widget.accountProfile;
+  String? _accountError;
+  bool _refreshingAccount = false;
   final Map<String, bool> _expandedServerGroups = {};
   String? _subscriptionError;
 
@@ -117,6 +122,11 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
     _primarySubscriptionError = widget.primarySubscriptionError;
     _primaryMetadata = widget.primaryMetadata;
     _selectedThemeMode = widget.themeMode;
+    if (widget.authToken != null && _accountProfile == null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) unawaited(_refreshAccount());
+      });
+    }
     unawaited(_restoreVpnMode());
     if (_profiles.isNotEmpty) {
       _selectedProfile = _profiles.first;
@@ -126,6 +136,31 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
     }
     unawaited(_restoreExternalSubscriptions());
     unawaited(_restoreFavoriteProfiles());
+  }
+
+  Future<void> _refreshAccount() async {
+    final token = widget.authToken;
+    if (token == null || _refreshingAccount) return;
+    setState(() {
+      _refreshingAccount = true;
+      _accountError = null;
+    });
+    try {
+      final profile = await _authApi.fetchProfile(token);
+      if (!mounted) return;
+      setState(() {
+        _accountProfile = profile;
+        _accountError = null;
+      });
+    } on AuthApiException catch (error) {
+      if (mounted) setState(() => _accountError = error.message);
+    } catch (_) {
+      if (mounted) {
+        setState(() => _accountError = 'Не удалось обновить данные аккаунта.');
+      }
+    } finally {
+      if (mounted) setState(() => _refreshingAccount = false);
+    }
   }
 
   Future<void> _restoreVpnMode() async {
@@ -381,6 +416,8 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
         final loaded = await _subscriptionApi.fetchProfiles(account.uuid);
         if (!mounted) return;
         setState(() {
+          _accountProfile = account;
+          _accountError = null;
           _primaryProfiles
             ..clear()
             ..addAll(loaded.profiles);
@@ -620,10 +657,12 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
 
     List<SubscriptionProfile>? refreshedPrimary;
     SubscriptionMetadata? refreshedPrimaryMetadata;
+    AuthProfile? refreshedAccountProfile;
     String? primaryError;
     if (authToken != null) {
       try {
         final account = await _authApi.fetchProfile(authToken);
+        refreshedAccountProfile = account;
         final loaded = await _subscriptionApi.fetchProfiles(account.uuid);
         refreshedPrimary = loaded.profiles;
         refreshedPrimaryMetadata = loaded.metadata;
@@ -638,6 +677,10 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
     if (!mounted) return;
 
     setState(() {
+      if (refreshedAccountProfile != null) {
+        _accountProfile = refreshedAccountProfile;
+        _accountError = null;
+      }
       if (refreshedPrimary != null) {
         _primaryProfiles
           ..clear()
@@ -2002,23 +2045,226 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
 
   Widget _buildProfileView({required bool canUpdate}) {
     final theme = Theme.of(context);
-    return Center(
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 560),
-        child: Card(
+    final account = _accountProfile;
+    final expiry =
+        account?.subscriptionExpiresAt ?? _metadataExpiry(_primaryMetadata);
+    final isActive = account?.hasActiveAccess ??
+        (expiry != null && expiry.isAfter(DateTime.now()));
+    final colors = theme.colorScheme;
+
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(8, 20, 8, 72),
+      children: [
+        if (widget.authToken != null)
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(18),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          'Подписка',
+                          style: theme.textTheme.titleMedium
+                              ?.copyWith(fontWeight: FontWeight.w700),
+                        ),
+                      ),
+                      IconButton(
+                        tooltip: _refreshingAccount
+                            ? 'Обновляем данные аккаунта…'
+                            : 'Обновить данные аккаунта',
+                        onPressed: _refreshingAccount ? null : _refreshAccount,
+                        icon: _refreshingAccount
+                            ? const SizedBox(
+                                width: 20,
+                                height: 20,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              )
+                            : const Icon(Icons.refresh_rounded),
+                      ),
+                    ],
+                  ),
+                  if (account == null) ...[
+                    if (_refreshingAccount)
+                      const LinearProgressIndicator()
+                    else ...[
+                      Text(
+                        _accountError ?? 'Данные подписки ещё не загружены.',
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          color: _accountError == null
+                              ? colors.onSurfaceVariant
+                              : colors.error,
+                        ),
+                      ),
+                      if (_accountError != null)
+                        Align(
+                          alignment: Alignment.centerLeft,
+                          child: TextButton.icon(
+                            onPressed: _refreshAccount,
+                            icon: const Icon(Icons.refresh_rounded),
+                            label: const Text('Повторить'),
+                          ),
+                        ),
+                    ],
+                  ] else ...[
+                    Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: isActive
+                            ? colors.primaryContainer
+                            : colors.errorContainer,
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: Row(
+                        children: [
+                          Icon(
+                            isActive
+                                ? Icons.check_circle_rounded
+                                : Icons.error_outline_rounded,
+                            color: isActive
+                                ? colors.onPrimaryContainer
+                                : colors.onErrorContainer,
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  isActive
+                                      ? 'Подписка активна'
+                                      : 'Подписка не активна',
+                                  style: theme.textTheme.titleSmall?.copyWith(
+                                    color: isActive
+                                        ? colors.onPrimaryContainer
+                                        : colors.onErrorContainer,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                                Text(
+                                  expiry == null
+                                      ? (isActive
+                                          ? 'Срок окончания не указан.'
+                                          : 'Оформите или продлите подписку, чтобы получить доступ.')
+                                      : '${isActive ? 'Действует до' : 'Дата окончания'} ${_formatAccountDate(expiry)}',
+                                  style: theme.textTheme.bodySmall?.copyWith(
+                                    color: isActive
+                                        ? colors.onPrimaryContainer
+                                        : colors.onErrorContainer,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    LayoutBuilder(
+                      builder: (context, constraints) {
+                        final width = (constraints.maxWidth - 8) / 2;
+                        final metrics = <(IconData, String, String)>[
+                          (
+                            Icons.account_balance_wallet_outlined,
+                            'Баланс',
+                            _formatRubles(account.balance),
+                          ),
+                          (
+                            Icons.warning_amber_rounded,
+                            'Долг',
+                            _formatRubles(account.debt),
+                          ),
+                          (
+                            Icons.percent_rounded,
+                            'Скидка',
+                            '${_formatNumber(account.totalDiscountPercent)}%',
+                          ),
+                          if (account.hasMoneyForNextSubscriptionMonth != null)
+                            (
+                              Icons.event_available_rounded,
+                              'На следующее продление',
+                              account.hasMoneyForNextSubscriptionMonth!
+                                  ? 'Хватит средств'
+                                  : 'Может не хватить',
+                            ),
+                        ];
+                        return Wrap(
+                          spacing: 8,
+                          runSpacing: 8,
+                          children: [
+                            for (final metric in metrics)
+                              SizedBox(
+                                width: width,
+                                child: _accountMetric(
+                                  metric.$1,
+                                  metric.$2,
+                                  metric.$3,
+                                ),
+                              ),
+                          ],
+                        );
+                      },
+                    ),
+                    if (_hasSubscriptionTraffic(_primaryMetadata)) ...[
+                      const SizedBox(height: 12),
+                      const Divider(height: 1),
+                      const SizedBox(height: 10),
+                      Text(
+                        'Использование трафика',
+                        style: theme.textTheme.labelLarge,
+                      ),
+                      const SizedBox(height: 8),
+                      _trafficUsage(_primaryMetadata),
+                    ],
+                    if (_primaryMetadata.devicesLimit != null ||
+                        _primaryMetadata.devicesUsed != null) ...[
+                      const SizedBox(height: 8),
+                      _metadataChip(
+                        Icons.devices_rounded,
+                        'Устройства',
+                        '${_primaryMetadata.devicesUsed ?? 0}/${_primaryMetadata.devicesLimit ?? '∞'}',
+                      ),
+                    ],
+                    if (account.hasMoneyForNextSubscriptionMonth == false &&
+                        isActive) ...[
+                      const SizedBox(height: 10),
+                      _accountNotice(
+                        Icons.info_outline_rounded,
+                        'На следующее продление может не хватить средств. Лучше пополнить баланс заранее.',
+                      ),
+                    ],
+                    if (_accountError != null) ...[
+                      const SizedBox(height: 8),
+                      Text(
+                        _accountError!,
+                        style: theme.textTheme.bodySmall
+                            ?.copyWith(color: colors.error),
+                      ),
+                    ],
+                  ],
+                ],
+              ),
+            ),
+          ),
+        Card(
           child: Padding(
-            padding: const EdgeInsets.all(24),
+            padding: const EdgeInsets.all(18),
             child: Column(
-              mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                Text('Профиль',
-                    style: theme.textTheme.titleMedium
-                        ?.copyWith(fontWeight: FontWeight.w700)),
+                Text(
+                  'Профиль',
+                  style: theme.textTheme.titleMedium
+                      ?.copyWith(fontWeight: FontWeight.w700),
+                ),
                 const SizedBox(height: 12),
                 if (widget.authToken == null) ...[
                   const Text(
-                      'Войдите, чтобы получить доступ к подписке Oksana VPN.'),
+                      'Войдите, чтобы посмотреть статус подписки и данные аккаунта.'),
                   const SizedBox(height: 16),
                   FilledButton.icon(
                     onPressed: canUpdate
@@ -2036,9 +2282,33 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
                     label: const Text('Войти'),
                   ),
                 ] else ...[
-                  Text(widget.accountName.isEmpty
-                      ? 'Вход выполнен'
-                      : widget.accountName),
+                  Text(
+                    account?.name.isNotEmpty == true
+                        ? account!.name
+                        : widget.accountName.isEmpty
+                            ? 'Вход выполнен'
+                            : widget.accountName,
+                    style: theme.textTheme.titleSmall
+                        ?.copyWith(fontWeight: FontWeight.w600),
+                  ),
+                  if (account?.telegram != null) ...[
+                    const SizedBox(height: 8),
+                    _accountDetail(
+                      Icons.alternate_email_rounded,
+                      'Telegram',
+                      account!.telegram!.startsWith('@')
+                          ? account.telegram!
+                          : '@${account.telegram}',
+                    ),
+                  ],
+                  if (account?.telegramId != null) ...[
+                    const SizedBox(height: 6),
+                    _accountDetail(
+                      Icons.tag_rounded,
+                      'Telegram ID',
+                      account!.telegramId!,
+                    ),
+                  ],
                   const SizedBox(height: 16),
                   OutlinedButton.icon(
                     onPressed: canUpdate ? _logout : null,
@@ -2050,9 +2320,135 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
             ),
           ),
         ),
+      ],
+    );
+  }
+
+  Widget _accountMetric(IconData icon, String label, String value) {
+    final theme = Theme.of(context);
+    final colors = theme.colorScheme;
+    return Container(
+      padding: const EdgeInsets.all(11),
+      decoration: BoxDecoration(
+        color: colors.surfaceContainerLow,
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Row(
+        children: [
+          Icon(icon, size: 18, color: colors.primary),
+          const SizedBox(width: 9),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.bodySmall
+                      ?.copyWith(color: colors.onSurfaceVariant),
+                ),
+                Text(
+                  value,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.labelLarge
+                      ?.copyWith(fontWeight: FontWeight.w700),
+                ),
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }
+
+  Widget _accountDetail(IconData icon, String label, String value) {
+    final colors = Theme.of(context).colorScheme;
+    return Row(
+      children: [
+        Icon(icon, size: 17, color: colors.onSurfaceVariant),
+        const SizedBox(width: 8),
+        Text('$label: ', style: Theme.of(context).textTheme.bodySmall),
+        Expanded(
+          child: Text(
+            value,
+            overflow: TextOverflow.ellipsis,
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  fontWeight: FontWeight.w600,
+                ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _accountNotice(IconData icon, String message) {
+    final colors = Theme.of(context).colorScheme;
+    return Container(
+      padding: const EdgeInsets.all(11),
+      decoration: BoxDecoration(
+        color: colors.tertiaryContainer,
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(icon, size: 18, color: colors.onTertiaryContainer),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              message,
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: colors.onTertiaryContainer,
+                  ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  DateTime? _metadataExpiry(SubscriptionMetadata metadata) {
+    final expiresAt = metadata.expiresAt;
+    if (expiresAt == null || expiresAt <= 0) return null;
+    return DateTime.fromMillisecondsSinceEpoch(expiresAt * 1000).toLocal();
+  }
+
+  bool _hasSubscriptionTraffic(SubscriptionMetadata metadata) =>
+      metadata.uploadBytes != null ||
+      metadata.downloadBytes != null ||
+      metadata.totalBytes != null;
+
+  String _formatAccountDate(DateTime date) {
+    const months = [
+      'января',
+      'февраля',
+      'марта',
+      'апреля',
+      'мая',
+      'июня',
+      'июля',
+      'августа',
+      'сентября',
+      'октября',
+      'ноября',
+      'декабря',
+    ];
+    final local = date.toLocal();
+    return '${local.day} ${months[local.month - 1]} ${local.year}';
+  }
+
+  String _formatRubles(num value) {
+    final amount = value % 1 == 0
+        ? value.toStringAsFixed(0)
+        : value.toStringAsFixed(2).replaceAll('.', ',');
+    return '$amount ₽';
+  }
+
+  String _formatNumber(num value) => value % 1 == 0
+      ? value.toStringAsFixed(0)
+      : value.toStringAsFixed(1).replaceAll('.', ',');
 
   String _connectionStatus(VpnRuntimeSnapshot state) {
     if (_restartingForSettings) return 'Применяем настройки…';

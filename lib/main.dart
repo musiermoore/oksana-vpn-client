@@ -138,6 +138,7 @@ class _OksanaVpnAppState extends State<OksanaVpnApp> {
             themeMode: _themeMode,
             onThemeModeChanged: _setThemeMode,
             authToken: token,
+            accountProfile: profile,
             primarySubscriptionError: primarySubscriptionError,
             primaryMetadata: primaryMetadata,
           ),
