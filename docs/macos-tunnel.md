@@ -29,7 +29,7 @@ Later connect/disconnect actions use a Unix socket at `/var/run/com.oksana1984.o
 
 The app replaces profile inbounds with Xray's `tun` inbound and enables full IPv4/IPv6 `autoSystemRoutingTable` routes plus `autoOutboundsInterface: auto` so Xray's own server connection stays on the physical interface. The helper runs as root because Xray needs permission to create `utun` and manage routes.
 
-Xray does not apply the profile's DNS field to macOS system DNS. The helper snapshots DNS settings per network service with `networksetup`, sets the profile's IP DNS servers, and restores the previous settings when Xray stops or the daemon starts after a reboot. A TUN profile without an IP DNS server is rejected instead of silently substituting a public resolver. The DNS snapshot and temporary Xray config are kept under the root-only runtime directory.
+Xray does not apply its `dns` field to macOS system DNS. The helper snapshots DNS settings per network service with `networksetup`, sets the effective resolver's IP address, and restores the previous settings when Xray stops or the daemon starts after a reboot. Settings offers a global DNS provider for TUN; DNS set by the active routing template takes precedence. DoH hostnames are bootstrapped through the `dns.hosts` map. The effective configuration must expose an IP resolver directly or through that map; the runtime does not silently substitute a public resolver. The DNS snapshot and temporary Xray config are kept under the root-only runtime directory.
 
 The helper waits for Xray to create a new `utun` interface before it reports the tunnel as running. Xray owns route creation and removal. On stop or Xray termination, the helper restores DNS and removes the temporary config.
 

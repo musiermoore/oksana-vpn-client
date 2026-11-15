@@ -3,7 +3,12 @@ import 'dart:convert';
 import 'dart:ffi';
 import 'dart:io';
 
+import '../models/local_socks_auth_settings.dart';
 import '../models/subscription_profile.dart';
+import '../models/vpn_routing_settings.dart';
+import '../services/routing_geo_data_loader.dart';
+import '../services/xray_routing_configuration.dart';
+import '../services/xray_socks_authentication.dart';
 import 'vpn_runtime.dart';
 
 const _xrayExecutableOverride = String.fromEnvironment('XRAY_EXECUTABLE');
@@ -36,7 +41,14 @@ class MacosProxyRuntime implements VpnRuntime, VpnConnectivityProbe {
       mode == VpnMode.proxy;
 
   @override
-  Future<void> connect(SubscriptionProfile profile, VpnMode mode) async {
+  Future<void> connect(
+    SubscriptionProfile profile,
+    VpnMode mode, {
+    VpnRoutingSettings routingSettings = const VpnRoutingSettings(),
+    GlobalDnsSettings globalDnsSettings = const GlobalDnsSettings(),
+    LocalSocksAuthSettings localSocksAuthSettings =
+        const LocalSocksAuthSettings(),
+  }) async {
     if (!Platform.isMacOS) {
       throw const VpnRuntimeException(
           'Прокси-режим недоступен на этом устройстве.');
@@ -63,7 +75,11 @@ class MacosProxyRuntime implements VpnRuntime, VpnConnectivityProbe {
       }
       _ensureNotDisposed();
 
-      final configuration = _prepareConfiguration(profile);
+      final configuration = _prepareConfiguration(
+        profile,
+        routingSettings,
+        localSocksAuthSettings,
+      );
       final ports = _findProxyPorts(configuration);
       if (ports.isEmpty) {
         throw const VpnRuntimeException(
@@ -74,6 +90,10 @@ class MacosProxyRuntime implements VpnRuntime, VpnConnectivityProbe {
       final directory = await Directory.systemTemp.createTemp('oksana-vpn-');
       _workingDirectory = directory;
       _ensureNotDisposed();
+      final assetDirectory = await _prepareAssetDirectory(
+        directory,
+        routingSettings,
+      );
       final configFile = File('${directory.path}/profile.json');
       await configFile.writeAsString(
         const JsonEncoder.withIndent('  ').convert(configuration),
@@ -85,7 +105,7 @@ class MacosProxyRuntime implements VpnRuntime, VpnConnectivityProbe {
         executable.path,
         ['run', '-c', configFile.path],
         workingDirectory: directory.path,
-        environment: {'XRAY_LOCATION_ASSET': _resourceDirectory},
+        environment: {'XRAY_LOCATION_ASSET': assetDirectory},
         runInShell: false,
       );
       _process = process;
@@ -217,7 +237,11 @@ class MacosProxyRuntime implements VpnRuntime, VpnConnectivityProbe {
     return '${executable.parent.parent.path}/Resources';
   }
 
-  Map<String, dynamic> _prepareConfiguration(SubscriptionProfile profile) {
+  Map<String, dynamic> _prepareConfiguration(
+    SubscriptionProfile profile,
+    VpnRoutingSettings routingSettings,
+    LocalSocksAuthSettings localSocksAuthSettings,
+  ) {
     final configuration =
         jsonDecode(jsonEncode(profile.toRuntimeConfiguration()))
             as Map<String, dynamic>;
@@ -250,23 +274,157 @@ class MacosProxyRuntime implements VpnRuntime, VpnConnectivityProbe {
       return configuration;
     }
 
-    final hasLocalProxy = inbounds.any((item) {
-      if (item is! Map) return false;
-      return item['protocol'] == 'socks' || item['protocol'] == 'http';
-    });
+    if (localSocksAuthSettings.enabled &&
+        localSocksAuthSettings.validationError != null) {
+      throw VpnRuntimeException(localSocksAuthSettings.validationError!);
+    }
 
-    if (!hasLocalProxy) {
+    final hasLocalProxy = inbounds.any(_isLocalProxyInbound);
+    final hasLocalSocks = inbounds.any(_isLocalSocksInbound);
+    if (!hasLocalProxy || (localSocksAuthSettings.enabled && !hasLocalSocks)) {
+      final usedTags = inbounds
+          .whereType<Map>()
+          .map((inbound) => inbound['tag'])
+          .whereType<String>()
+          .toSet();
+      final usedPorts = inbounds
+          .whereType<Map>()
+          .map((inbound) => inbound['port'])
+          .whereType<int>()
+          .toSet();
+      var port = 10808;
+      while (usedPorts.contains(port)) {
+        port++;
+      }
       inbounds.add({
-        'tag': 'local-socks',
+        'tag': _uniqueTag('local-socks', usedTags),
         'listen': '127.0.0.1',
-        'port': 10808,
+        'port': port,
         'protocol': 'socks',
         'settings': {'udp': true},
       });
     }
 
+    if (localSocksAuthSettings.enabled) {
+      for (var index = 0; index < inbounds.length; index++) {
+        final item = inbounds[index];
+        if (item is! Map || !_isLocalSocksInbound(item)) continue;
+        final inbound = Map<String, dynamic>.from(item);
+        XraySocksAuthentication.apply(inbound, localSocksAuthSettings);
+        inbounds[index] = inbound;
+      }
+    }
+
+    if (routingSettings.enabled) {
+      final usedTags = inbounds
+          .whereType<Map>()
+          .map((inbound) => inbound['tag'])
+          .whereType<String>()
+          .toSet();
+      final inboundTags = <String>[];
+      for (var index = 0; index < inbounds.length; index++) {
+        final item = inbounds[index];
+        if (item is! Map || !_isLocalProxyInbound(item)) continue;
+        final inbound = Map<String, dynamic>.from(item);
+        var tag = inbound['tag'];
+        if (tag is! String || tag.isEmpty) {
+          tag = _uniqueTag('oksana-local-proxy', usedTags);
+          inbound['tag'] = tag;
+          inbounds[index] = inbound;
+        }
+        inboundTags.add(tag);
+
+        if (routingSettings.activeTemplate.usesFakeDns ||
+            routingSettings.activeTemplate.rules
+                .any((rule) => rule.hasDomainTarget)) {
+          final sniffing = inbound['sniffing'] is Map
+              ? Map<String, dynamic>.from(inbound['sniffing'] as Map)
+              : <String, dynamic>{};
+          final overrides = sniffing['destOverride'] is List
+              ? (sniffing['destOverride'] as List).whereType<String>().toList()
+              : <String>[];
+          for (final protocol in ['http', 'tls', 'quic']) {
+            if (!overrides.contains(protocol)) overrides.add(protocol);
+          }
+          if (routingSettings.activeTemplate.usesFakeDns &&
+              !overrides.contains('fakedns')) {
+            overrides.add('fakedns');
+          }
+          sniffing
+            ..['enabled'] = true
+            ..['routeOnly'] = true
+            ..['destOverride'] = overrides;
+          inbound['sniffing'] = sniffing;
+          inbounds[index] = inbound;
+        }
+      }
+
+      XrayRoutingConfiguration.apply(
+        configuration,
+        routingSettings,
+        inboundTags: inboundTags,
+      );
+    }
+
     configuration['inbounds'] = inbounds;
     return configuration;
+  }
+
+  bool _isLocalProxyInbound(Object? value) {
+    if (value is! Map ||
+        (value['protocol'] != 'socks' && value['protocol'] != 'http')) {
+      return false;
+    }
+    return value['listen'] == '127.0.0.1';
+  }
+
+  bool _isLocalSocksInbound(Object? value) =>
+      value is Map &&
+      value['protocol'] == 'socks' &&
+      value['listen'] == '127.0.0.1';
+
+  String _uniqueTag(String base, Set<String> usedTags) {
+    var tag = base;
+    var suffix = 2;
+    while (usedTags.contains(tag)) {
+      tag = '$base-${suffix++}';
+    }
+    usedTags.add(tag);
+    return tag;
+  }
+
+  Future<String> _prepareAssetDirectory(
+    Directory workingDirectory,
+    VpnRoutingSettings routingSettings,
+  ) async {
+    if (!routingSettings.enabled) return _resourceDirectory;
+
+    final assetDirectory = Directory('${workingDirectory.path}/assets');
+    await assetDirectory.create();
+    for (final fileName in ['geoip.dat', 'geosite.dat']) {
+      final bundledFile = File('$_resourceDirectory/$fileName');
+      if (!await bundledFile.exists()) {
+        throw const VpnRuntimeException(
+          'Не найдены встроенные базы геоданных. Переустановите приложение.',
+        );
+      }
+      await bundledFile.copy('${assetDirectory.path}/$fileName');
+    }
+
+    final downloaded =
+        await RoutingGeoDataLoader.download(routingSettings.activeTemplate);
+    for (final entry in downloaded.entries) {
+      final fileName = switch (entry.key) {
+        'geoipData' => 'geoip.dat',
+        'geositeData' => 'geosite.dat',
+        _ => null,
+      };
+      if (fileName != null) {
+        await File('${assetDirectory.path}/$fileName')
+            .writeAsBytes(entry.value, flush: true);
+      }
+    }
+    return assetDirectory.path;
   }
 
   List<int> _findProxyPorts(Map<String, dynamic> configuration) {

@@ -1,6 +1,8 @@
 import 'dart:async';
 
+import '../models/local_socks_auth_settings.dart';
 import '../models/subscription_profile.dart';
+import '../models/vpn_routing_settings.dart';
 
 enum VpnMode { proxy, tun }
 
@@ -23,7 +25,14 @@ abstract interface class VpnRuntime {
   Stream<VpnRuntimeSnapshot> get changes;
   bool supports(VpnMode mode);
 
-  Future<void> connect(SubscriptionProfile profile, VpnMode mode);
+  Future<void> connect(
+    SubscriptionProfile profile,
+    VpnMode mode, {
+    VpnRoutingSettings routingSettings = const VpnRoutingSettings(),
+    GlobalDnsSettings globalDnsSettings = const GlobalDnsSettings(),
+    LocalSocksAuthSettings localSocksAuthSettings =
+        const LocalSocksAuthSettings(),
+  });
   Future<void> disconnect();
   void dispose();
 }

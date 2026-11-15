@@ -1,7 +1,9 @@
 import 'dart:async';
 import 'dart:io';
 
+import '../models/local_socks_auth_settings.dart';
 import '../models/subscription_profile.dart';
+import '../models/vpn_routing_settings.dart';
 import 'macos_daemon_tunnel_runtime.dart';
 import 'macos_proxy_runtime.dart';
 import 'vpn_runtime.dart';
@@ -56,7 +58,14 @@ class MacosVpnRuntime implements VpnRuntime, VpnConnectivityProbe {
   }
 
   @override
-  Future<void> connect(SubscriptionProfile profile, VpnMode mode) async {
+  Future<void> connect(
+    SubscriptionProfile profile,
+    VpnMode mode, {
+    VpnRoutingSettings routingSettings = const VpnRoutingSettings(),
+    GlobalDnsSettings globalDnsSettings = const GlobalDnsSettings(),
+    LocalSocksAuthSettings localSocksAuthSettings =
+        const LocalSocksAuthSettings(),
+  }) async {
     final runtime = switch (mode) {
       VpnMode.proxy => _proxy,
       VpnMode.tun => _tunnel,
@@ -73,7 +82,13 @@ class MacosVpnRuntime implements VpnRuntime, VpnConnectivityProbe {
       _publish();
     });
     _publish();
-    await runtime.connect(profile, mode);
+    await runtime.connect(
+      profile,
+      mode,
+      routingSettings: routingSettings,
+      globalDnsSettings: globalDnsSettings,
+      localSocksAuthSettings: localSocksAuthSettings,
+    );
     _snapshot = runtime.snapshot;
     _publish();
   }

@@ -8,9 +8,12 @@ private let ownerUIDFile = supportDirectory + "/control-owner-uid"
 private let socketPath = "/var/run/com.oksana1984.oksanaVpnDesktop.sock"
 private let xrayPath = supportDirectory + "/xray"
 private let assetDirectory = supportDirectory + "/assets"
+private let defaultAssetDirectory = supportDirectory + "/default-assets"
 private let configurationPath = runtimeDirectory + "/active.json"
 private let dnsSnapshotPath = runtimeDirectory + "/previous-dns.json"
-private let maximumRequestBytes = 2 * 1024 * 1024
+private let maximumRequestBytes = 96 * 1024 * 1024
+private let maximumGeoDataBytes = 32 * 1024 * 1024
+private let helperAPIVersion = 2
 
 final class VpnDaemon {
   private let queue = DispatchQueue(label: "com.oksana1984.oksanaVpnDesktop.daemon")
@@ -145,13 +148,22 @@ final class VpnDaemon {
         guard let configuration = object["configuration"] as? String else {
           throw Self.error("The VPN profile is missing.")
         }
-        try start(configuration: configuration)
+        let geoipData = try decodeGeoData(object["geoipData"])
+        let geositeData = try decodeGeoData(object["geositeData"])
+        try start(
+          configuration: configuration,
+          geoipData: geoipData,
+          geositeData: geositeData
+        )
         writeResponse(["ok": true, "state": "running"], to: client)
       case "stop":
         try stop()
         writeResponse(["ok": true, "state": "disconnected"], to: client)
       case "status":
-        writeResponse(["ok": true, "state": currentState], to: client)
+        writeResponse(
+          ["ok": true, "state": currentState, "apiVersion": helperAPIVersion],
+          to: client
+        )
       default:
         writeResponse(["ok": false, "error": "Unsupported VPN service command."], to: client)
       }
@@ -165,7 +177,11 @@ final class VpnDaemon {
     return "running"
   }
 
-  private func start(configuration: String) throws {
+  private func start(
+    configuration: String,
+    geoipData: Data?,
+    geositeData: Data?
+  ) throws {
     try stop()
 
     guard let data = configuration.data(using: .utf8), data.count <= maximumRequestBytes,
@@ -175,6 +191,26 @@ final class VpnDaemon {
           let outbounds = profile["outbounds"] as? [[String: Any]], !outbounds.isEmpty else {
       throw Self.error("The VPN profile is invalid or does not contain a TUN inbound.")
     }
+
+    let geoipURL = URL(fileURLWithPath: assetDirectory).appendingPathComponent("geoip.dat")
+    let geositeURL = URL(fileURLWithPath: assetDirectory).appendingPathComponent("geosite.dat")
+    let previousGeoip = try Data(contentsOf: geoipURL)
+    let previousGeosite = try Data(contentsOf: geositeURL)
+    var keepNewGeoData = false
+    defer {
+      if !keepNewGeoData {
+        try? writeGeoData(previousGeoip, to: geoipURL)
+        try? writeGeoData(previousGeosite, to: geositeURL)
+      }
+    }
+    let bundledGeoip = try Data(
+      contentsOf: URL(fileURLWithPath: defaultAssetDirectory).appendingPathComponent("geoip.dat")
+    )
+    let bundledGeosite = try Data(
+      contentsOf: URL(fileURLWithPath: defaultAssetDirectory).appendingPathComponent("geosite.dat")
+    )
+    try writeGeoData(geoipData ?? bundledGeoip, to: geoipURL)
+    try writeGeoData(geositeData ?? bundledGeosite, to: geositeURL)
 
     // Xray runs as root so it can create utun and manage routes. Prevent the
     // subscription profile from writing Xray logs to arbitrary file paths.
@@ -232,6 +268,26 @@ final class VpnDaemon {
       try? stop()
       throw error
     }
+    keepNewGeoData = true
+  }
+
+  private func writeGeoData(_ data: Data, to url: URL) throws {
+    try data.write(to: url, options: .atomic)
+    try FileManager.default.setAttributes(
+      [.posixPermissions: 0o644, .ownerAccountID: 0, .groupOwnerAccountID: 0],
+      ofItemAtPath: url.path
+    )
+  }
+
+  private func decodeGeoData(_ value: Any?) throws -> Data? {
+    guard let value else { return nil }
+    guard let encoded = value as? String,
+          let data = Data(base64Encoded: encoded),
+          !data.isEmpty,
+          data.count <= maximumGeoDataBytes else {
+      throw Self.error("A geodata file is invalid or exceeds the 32 MB limit.")
+    }
+    return data
   }
 
   private func stop() throws {
@@ -339,6 +395,7 @@ final class VpnDaemon {
     guard let dns = value as? [String: Any], let servers = dns["servers"] as? [Any] else {
       return []
     }
+    let hosts = dns["hosts"] as? [String: String] ?? [:]
     var result: [String] = []
     for server in servers {
       let candidate: String?
@@ -349,8 +406,21 @@ final class VpnDaemon {
       } else {
         candidate = nil
       }
-      guard let candidate, isIPAddress(candidate), !result.contains(candidate) else { continue }
-      result.append(candidate)
+      guard let candidate else { continue }
+      let address: String
+      if isIPAddress(candidate) {
+        address = candidate
+      } else if let host = URLComponents(string: candidate)?.host,
+                isIPAddress(host) {
+        address = host
+      } else if let host = URLComponents(string: candidate)?.host,
+                let bootstrapAddress = hosts[host],
+                isIPAddress(bootstrapAddress) {
+        address = bootstrapAddress
+      } else {
+        continue
+      }
+      if !result.contains(address) { result.append(address) }
       if result.count == 4 { break }
     }
     return result
@@ -373,9 +443,10 @@ final class VpnDaemon {
       if count <= 0 { return nil }
       if let newline = buffer[..<count].firstIndex(of: 10) {
         request.append(contentsOf: buffer[..<newline])
-        return request
+        return request.count <= maximumRequestBytes ? request : nil
       }
       request.append(contentsOf: buffer[..<count])
+      if request.count > maximumRequestBytes { return nil }
     }
     return nil
   }

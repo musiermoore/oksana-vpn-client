@@ -18,6 +18,9 @@ class SecureAppStateStore {
     'vpn_mode',
     'external_subscriptions',
     'favorite_subscription_profiles',
+    'vpn_routing_settings',
+    'global_dns_settings',
+    'local_socks_auth_settings',
   };
   static const _storage = FlutterSecureStorage(
     mOptions: MacOsOptions(usesDataProtectionKeychain: false),

@@ -1,8 +1,24 @@
 import 'package:flutter/material.dart';
 
 abstract final class AppTheme {
-  static const primary = Color(0xFF6C4CF5);
-  static const primaryPressed = Color(0xFF5B3DE2);
+  /// Canonical UI accent. Selected controls should use colorScheme.primary.
+  static const primary = Color(0xFF7956FF);
+  static const primaryPressed = Color(0xFF613DEB);
+
+  static ButtonStyle selectionControlStyle(ColorScheme colors) => ButtonStyle(
+        backgroundColor: WidgetStateProperty.resolveWith((states) =>
+            states.contains(WidgetState.selected) ? colors.primary : null),
+        foregroundColor: WidgetStateProperty.resolveWith((states) =>
+            states.contains(WidgetState.selected)
+                ? Colors.white
+                : colors.onSurface),
+        side: WidgetStateProperty.resolveWith((states) => BorderSide(
+              color: states.contains(WidgetState.selected)
+                  ? primaryPressed
+                  : colors.outlineVariant,
+              width: states.contains(WidgetState.selected) ? 2 : 1,
+            )),
+      );
 
   static final light = _buildTheme(
     brightness: Brightness.light,
@@ -35,7 +51,7 @@ abstract final class AppTheme {
       brightness: brightness,
     ).copyWith(
       primary:
-          brightness == Brightness.dark ? const Color(0xFF7C62FF) : primary,
+          brightness == Brightness.dark ? const Color(0xFFA18AFF) : primary,
       surface: surface,
       onSurface: text,
       outline: border,
@@ -66,19 +82,39 @@ abstract final class AppTheme {
         ),
         focusedBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(14),
-          borderSide: const BorderSide(color: primary, width: 1.5),
+          borderSide: BorderSide(color: scheme.primary, width: 1.5),
         ),
       ),
       filledButtonTheme: FilledButtonThemeData(
         style: FilledButton.styleFrom(
           minimumSize: const Size.fromHeight(52),
-          backgroundColor: primary,
+          backgroundColor: scheme.primary,
           foregroundColor: Colors.white,
-          disabledBackgroundColor: primary.withValues(alpha: 0.4),
+          disabledBackgroundColor: scheme.primary.withValues(alpha: 0.4),
           shape:
               RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
           textStyle: const TextStyle(fontWeight: FontWeight.w700, fontSize: 15),
         ),
+      ),
+      switchTheme: SwitchThemeData(
+        thumbColor: WidgetStateProperty.resolveWith((states) {
+          if (states.contains(WidgetState.disabled)) {
+            return scheme.onSurface.withValues(alpha: 0.38);
+          }
+          return Colors.white;
+        }),
+        trackColor: WidgetStateProperty.resolveWith((states) {
+          if (states.contains(WidgetState.disabled)) {
+            return scheme.onSurface.withValues(alpha: 0.12);
+          }
+          return states.contains(WidgetState.selected)
+              ? scheme.primary
+              : scheme.surfaceContainerHighest;
+        }),
+        trackOutlineColor: WidgetStateProperty.resolveWith((states) =>
+            states.contains(WidgetState.selected)
+                ? scheme.primary
+                : scheme.outline),
       ),
       cardTheme: CardThemeData(
         color: surface,

@@ -4,9 +4,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show OverflowBoxFit;
 import 'package:flutter/services.dart';
 
-import '../app_theme.dart';
 import '../models/subscription_metadata.dart';
 import '../models/subscription_profile.dart';
+import '../models/local_socks_auth_settings.dart';
+import '../models/vpn_routing_settings.dart';
 import '../services/app_settings_store.dart';
 import '../services/auth_api.dart';
 import '../services/auth_store.dart';
@@ -14,6 +15,7 @@ import '../services/subscription_api.dart';
 import '../services/subscription_store.dart';
 import '../vpn/vpn_runtime.dart';
 import '../vpn/vpn_runtime_factory.dart';
+import '../vpn/vpn_connection_restarter.dart';
 import 'settings_screen.dart';
 import 'subscription_screen.dart';
 
@@ -79,9 +81,15 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
   bool _refreshingSubscriptions = false;
   String? _activeSubscriptionKey = 'oksana';
   VpnMode _selectedMode = VpnMode.tun;
+  VpnRoutingSettings _routingSettings = const VpnRoutingSettings();
+  GlobalDnsSettings _globalDnsSettings = const GlobalDnsSettings();
+  LocalSocksAuthSettings _localSocksAuthSettings =
+      const LocalSocksAuthSettings();
   ThemeMode _selectedThemeMode = ThemeMode.system;
   late int _selectedTab = widget.initialTab;
   bool _switchingServer = false;
+  bool _restartingForSettings = false;
+  bool _connectionSettingsLoaded = false;
   List<String> _externalUrls = [];
   bool _loadingExternal = false;
   String? _externalError;
@@ -124,13 +132,25 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
     try {
       final mode = await _settingsStore.readVpnMode();
       final themeMode = await _settingsStore.readThemeMode();
+      final routingSettings = await _settingsStore.readRoutingSettings();
+      final globalDnsSettings = await _settingsStore.readGlobalDnsSettings();
+      final localSocksAuthSettings =
+          await _settingsStore.readLocalSocksAuthSettings();
       if (!mounted) return;
       setState(() {
         if (mode != null && _runtime.supports(mode)) _selectedMode = mode;
         if (themeMode != null) _selectedThemeMode = themeMode;
+        _routingSettings = routingSettings;
+        _globalDnsSettings = globalDnsSettings;
+        _localSocksAuthSettings = localSocksAuthSettings;
+        _connectionSettingsLoaded = true;
       });
     } catch (_) {
-      // Keep the default mode if preferences are unavailable.
+      if (!mounted) return;
+      setState(() {
+        _localSocksAuthSettings = LocalSocksAuthSettings.createSecureDefault();
+        _connectionSettingsLoaded = true;
+      });
     }
   }
 
@@ -396,6 +416,10 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
   }
 
   Future<void> _toggleConnection() async {
+    if (!_connectionSettingsLoaded) {
+      _showMessage('Загружаем настройки подключения…');
+      return;
+    }
     final selectedProfile = _selectedProfile;
     if (selectedProfile == null) {
       _showMessage('Добавьте подписку, чтобы выбрать сервер.');
@@ -405,7 +429,13 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
       if (_runtime.snapshot.phase == VpnRuntimePhase.running) {
         await _runtime.disconnect();
       } else {
-        await _runtime.connect(selectedProfile, _selectedMode);
+        await _runtime.connect(
+          selectedProfile,
+          _selectedMode,
+          routingSettings: _routingSettings,
+          globalDnsSettings: _globalDnsSettings,
+          localSocksAuthSettings: _localSocksAuthSettings,
+        );
       }
     } on VpnRuntimeException catch (error) {
       _showMessage(error.message);
@@ -413,6 +443,7 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
   }
 
   Future<void> _selectProfile(SubscriptionProfile profile) async {
+    if (!_connectionSettingsLoaded) return;
     final phase = _runtime.snapshot.phase;
     if (_switchingServer ||
         phase == VpnRuntimePhase.starting ||
@@ -438,7 +469,13 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
           );
         }
       }
-      await _runtime.connect(profile, _selectedMode);
+      await _runtime.connect(
+        profile,
+        _selectedMode,
+        routingSettings: _routingSettings,
+        globalDnsSettings: _globalDnsSettings,
+        localSocksAuthSettings: _localSocksAuthSettings,
+      );
     } on VpnRuntimeException catch (error) {
       _showMessage(error.message);
     } finally {
@@ -459,6 +496,10 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
     }
 
     final wasRunning = phase == VpnRuntimePhase.running;
+    if (wasRunning && !_connectionSettingsLoaded) {
+      _showMessage('Загружаем настройки подключения…');
+      return;
+    }
     setState(() => _switchingServer = wasRunning);
     try {
       if (wasRunning || phase == VpnRuntimePhase.error) {
@@ -476,7 +517,15 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
         _selectedProfile = profile;
         _pingResults.clear();
       });
-      if (wasRunning) await _runtime.connect(profile, _selectedMode);
+      if (wasRunning) {
+        await _runtime.connect(
+          profile,
+          _selectedMode,
+          routingSettings: _routingSettings,
+          globalDnsSettings: _globalDnsSettings,
+          localSocksAuthSettings: _localSocksAuthSettings,
+        );
+      }
     } on VpnRuntimeException catch (error) {
       _showMessage(error.message);
     } finally {
@@ -705,23 +754,29 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
     }
   }
 
-  void _changeMode(VpnMode mode) {
-    if (_runtime.snapshot.phase == VpnRuntimePhase.running ||
-        _runtime.snapshot.phase == VpnRuntimePhase.starting ||
-        _runtime.snapshot.phase == VpnRuntimePhase.stopping ||
-        mode == _selectedMode) {
-      return;
-    }
-
+  Future<void> _changeMode(VpnMode mode) async {
+    if (mode == _selectedMode) return;
+    _ensureSettingsCanChange();
     if (!_runtime.supports(mode)) {
-      _showMessage('Режим TUN недоступен на этом устройстве.');
-      return;
+      throw const VpnRuntimeException('Этот режим недоступен на устройстве.');
+    }
+    final wasRunning = _runtime.snapshot.phase == VpnRuntimePhase.running;
+    if (wasRunning && _selectedProfile == null) {
+      throw const VpnRuntimeException('Не выбран сервер для переподключения.');
     }
     setState(() => _selectedMode = mode);
-    unawaited(_saveVpnMode(mode));
+    final saving = _saveVpnMode(mode);
+    if (wasRunning) {
+      await _restartForSettings(saving);
+    } else {
+      await saving;
+    }
+    if (wasRunning || !mounted) return;
     final hint = mode == VpnMode.tun
         ? 'Весь системный трафик пойдёт через VPN. Может потребоваться разрешение на изменение сетевых настроек.'
-        : 'VPN будет доступен приложениям через локальные SOCKS/HTTP порты.';
+        : _localSocksAuthSettings.enabled
+            ? 'Proxy доступен через локальные порты. Для SOCKS5 используйте логин и пароль из настроек.'
+            : 'VPN будет доступен приложениям через локальные SOCKS/HTTP порты.';
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
       ..showSnackBar(
@@ -742,21 +797,166 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
     }
   }
 
+  Future<void> _changeRoutingSettings(VpnRoutingSettings settings) async {
+    if (_canonicalRoutingSettings(_routingSettings) ==
+        _canonicalRoutingSettings(settings)) {
+      return;
+    }
+    _ensureSettingsCanChange();
+    final wasRunning = _runtime.snapshot.phase == VpnRuntimePhase.running;
+    if (wasRunning && _selectedProfile == null) {
+      throw const VpnRuntimeException('Не выбран сервер для переподключения.');
+    }
+    setState(() => _routingSettings = settings);
+    final saving = _saveRoutingSettings(settings);
+    if (wasRunning) {
+      await _restartForSettings(saving);
+    } else {
+      await saving;
+    }
+  }
+
+  Future<void> _changeLocalSocksAuthSettings(
+    LocalSocksAuthSettings settings,
+  ) async {
+    if (_localSocksAuthSettings.encode() == settings.encode()) return;
+    if (settings.enabled && settings.validationError != null) {
+      throw VpnRuntimeException(settings.validationError!);
+    }
+    _ensureSettingsCanChange();
+    final wasRunning = _selectedMode == VpnMode.proxy &&
+        _runtime.snapshot.phase == VpnRuntimePhase.running;
+    if (wasRunning && _selectedProfile == null) {
+      throw const VpnRuntimeException('Не выбран сервер для переподключения.');
+    }
+    setState(() => _localSocksAuthSettings = settings);
+    final saving = _saveLocalSocksAuthSettings(settings);
+    if (wasRunning) {
+      await _restartForSettings(saving);
+    } else {
+      await saving;
+    }
+  }
+
+  Future<void> _changeGlobalDnsSettings(GlobalDnsSettings settings) async {
+    if (_globalDnsSettings.encode() == settings.encode()) return;
+    _ensureSettingsCanChange();
+    final wasRunning = _selectedMode == VpnMode.tun &&
+        _runtime.snapshot.phase == VpnRuntimePhase.running;
+    if (wasRunning && _selectedProfile == null) {
+      throw const VpnRuntimeException('Не выбран сервер для переподключения.');
+    }
+    setState(() => _globalDnsSettings = settings);
+    final saving = _saveGlobalDnsSettings(settings);
+    if (wasRunning) {
+      await _restartForSettings(saving);
+    } else {
+      await saving;
+    }
+  }
+
+  String _canonicalRoutingSettings(VpnRoutingSettings settings) =>
+      VpnRoutingSettings(
+        enabled: settings.enabled,
+        templates: settings.templates.isEmpty
+            ? [settings.activeTemplate]
+            : settings.templates,
+        activeTemplateId: settings.activeTemplate.id,
+      ).encode();
+
+  void _ensureSettingsCanChange() {
+    if (!_connectionSettingsLoaded) {
+      throw const VpnRuntimeException('Загружаем настройки подключения.');
+    }
+    final phase = _runtime.snapshot.phase;
+    if (_switchingServer ||
+        phase == VpnRuntimePhase.starting ||
+        phase == VpnRuntimePhase.stopping) {
+      throw const VpnRuntimeException('Дождитесь завершения подключения.');
+    }
+  }
+
+  Future<void> _restartForSettings(Future<void> saving) async {
+    final profile = _selectedProfile;
+    if (profile == null) {
+      throw const VpnRuntimeException('Не выбран сервер для переподключения.');
+    }
+    setState(() {
+      _switchingServer = true;
+      _restartingForSettings = true;
+    });
+    try {
+      await restartVpnConnection(
+        runtime: _runtime,
+        profile: profile,
+        mode: _selectedMode,
+        routingSettings: _routingSettings,
+        globalDnsSettings: _globalDnsSettings,
+        localSocksAuthSettings: _localSocksAuthSettings,
+        shouldReconnect: () => mounted,
+      );
+    } finally {
+      await saving;
+      if (mounted) {
+        setState(() {
+          _switchingServer = false;
+          _restartingForSettings = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _saveRoutingSettings(VpnRoutingSettings settings) async {
+    try {
+      await _settingsStore.saveRoutingSettings(settings);
+    } catch (_) {
+      if (mounted) _showMessage('Не удалось сохранить правила маршрутизации.');
+    }
+  }
+
+  Future<void> _saveGlobalDnsSettings(GlobalDnsSettings settings) async {
+    try {
+      await _settingsStore.saveGlobalDnsSettings(settings);
+    } catch (_) {
+      if (mounted) _showMessage('Не удалось сохранить настройки DNS.');
+    }
+  }
+
+  Future<void> _saveLocalSocksAuthSettings(
+    LocalSocksAuthSettings settings,
+  ) async {
+    try {
+      await _settingsStore.saveLocalSocksAuthSettings(settings);
+    } catch (_) {
+      if (mounted) _showMessage('Не удалось сохранить настройки SOCKS5.');
+    }
+  }
+
   void _changeThemeMode(ThemeMode mode) {
     setState(() => _selectedThemeMode = mode);
     widget.onThemeModeChanged(mode);
   }
 
-  void _openSettings({required bool vpnModeEnabled}) {
+  void _openSettings() {
     Navigator.of(context).push<void>(
       MaterialPageRoute<void>(
         builder: (_) => SettingsScreen(
           vpnMode: _selectedMode,
+          currentVpnMode: () => _selectedMode,
           onVpnModeChanged: _changeMode,
-          vpnModeEnabled: vpnModeEnabled,
+          runtime: _runtime,
           themeMode: _selectedThemeMode,
           onThemeModeChanged: _changeThemeMode,
           supportsTun: _runtime.supports(VpnMode.tun),
+          routingSettings: _routingSettings,
+          currentRoutingSettings: () => _routingSettings,
+          onRoutingSettingsChanged: _changeRoutingSettings,
+          globalDnsSettings: _globalDnsSettings,
+          currentGlobalDnsSettings: () => _globalDnsSettings,
+          onGlobalDnsSettingsChanged: _changeGlobalDnsSettings,
+          localSocksAuthSettings: _localSocksAuthSettings,
+          currentLocalSocksAuthSettings: () => _localSocksAuthSettings,
+          onLocalSocksAuthSettingsChanged: _changeLocalSocksAuthSettings,
         ),
       ),
     );
@@ -897,10 +1097,7 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
               ),
               IconButton(
                 tooltip: 'Настройки',
-                onPressed: () => _openSettings(
-                  vpnModeEnabled: state.phase == VpnRuntimePhase.disconnected ||
-                      state.phase == VpnRuntimePhase.error,
-                ),
+                onPressed: isBusy || _switchingServer ? null : _openSettings,
                 icon: const Icon(Icons.settings_outlined),
               ),
             ],
@@ -1572,18 +1769,18 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
         url: telegramUrl,
       ));
     }
+    if (metadata.announceUrl != null) {
+      links.add(_metadataLink(
+        icon: Icons.campaign_outlined,
+        label: 'Канал',
+        url: metadata.announceUrl!,
+      ));
+    }
     if (metadata.supportUrl != null) {
       links.add(_metadataLink(
         icon: Icons.support_agent_rounded,
         label: 'Помощь',
         url: metadata.supportUrl!,
-      ));
-    }
-    if (metadata.announceUrl != null) {
-      links.add(_metadataLink(
-        icon: Icons.campaign_outlined,
-        label: 'Новости',
-        url: metadata.announceUrl!,
       ));
     }
 
@@ -1603,8 +1800,8 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
         if (links.isNotEmpty) ...[
           if (hasTrafficData || details.isNotEmpty) const SizedBox(height: 6),
           Wrap(
-            spacing: 2,
-            runSpacing: 2,
+            spacing: 7,
+            runSpacing: 5,
             crossAxisAlignment: WrapCrossAlignment.center,
             children: links,
           ),
@@ -1696,30 +1893,29 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
     required String label,
     required String url,
   }) {
-    return Transform.translate(
-      offset: const Offset(-6, 0),
-      child: TextButton(
-        onPressed: () => unawaited(_openExternalLink(url)),
-        style: TextButton.styleFrom(
-          visualDensity: VisualDensity.compact,
-          padding: const EdgeInsets.only(left: 6, right: 10, top: 6, bottom: 6),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          mainAxisAlignment: MainAxisAlignment.start,
-          children: [
-            Icon(icon, size: 17),
-            const SizedBox(width: 4),
-            Text(
-              label,
-              textAlign: TextAlign.left,
-              style: Theme.of(context)
-                  .textTheme
-                  .labelMedium
-                  ?.copyWith(fontSize: 12),
-            ),
-          ],
-        ),
+    final colors = Theme.of(context).colorScheme;
+    return OutlinedButton(
+      onPressed: () => unawaited(_openExternalLink(url)),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 16),
+          const SizedBox(width: 4),
+          Text(
+            label,
+            style:
+                Theme.of(context).textTheme.labelMedium?.copyWith(fontSize: 12),
+          ),
+        ],
+      ),
+      style: OutlinedButton.styleFrom(
+        foregroundColor: colors.primary,
+        side: BorderSide(color: colors.primary.withValues(alpha: 0.7)),
+        visualDensity: VisualDensity.compact,
+        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        minimumSize: Size.zero,
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
       ),
     );
   }
@@ -1859,6 +2055,7 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
   }
 
   String _connectionStatus(VpnRuntimeSnapshot state) {
+    if (_restartingForSettings) return 'Применяем настройки…';
     if (_switchingServer) return 'Переключаем сервер…';
     return switch (state.phase) {
       VpnRuntimePhase.starting =>
@@ -1978,11 +2175,12 @@ class _PowerControl extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
     final running = phase == VpnRuntimePhase.running;
     final busy =
         phase == VpnRuntimePhase.starting || phase == VpnRuntimePhase.stopping;
     final active = running || phase == VpnRuntimePhase.stopping;
-    final color = active ? const Color(0xFF16A36A) : AppTheme.primary;
+    final color = active ? const Color(0xFF16A36A) : colors.primary;
     final isFilled = active || phase == VpnRuntimePhase.starting;
 
     return SizedBox.square(
@@ -2007,7 +2205,7 @@ class _PowerControl extends StatelessWidget {
                   height: 38,
                   child: CircularProgressIndicator(
                     strokeWidth: 3,
-                    color: isFilled ? Colors.white : AppTheme.primary,
+                    color: isFilled ? Colors.white : colors.primary,
                   ),
                 )
               : Icon(
@@ -2021,10 +2219,10 @@ class _PowerControl extends StatelessWidget {
             backgroundColor: isFilled ? color : Colors.transparent,
             disabledBackgroundColor:
                 isFilled ? color.withValues(alpha: 0.65) : Colors.transparent,
-            foregroundColor: isFilled ? Colors.white : AppTheme.primary,
+            foregroundColor: isFilled ? Colors.white : colors.primary,
             disabledForegroundColor: isFilled
                 ? Colors.white70
-                : AppTheme.primary.withValues(alpha: 0.6),
+                : colors.primary.withValues(alpha: 0.6),
             side: BorderSide(color: color, width: 2),
             shape: const CircleBorder(),
           ),
@@ -2088,9 +2286,14 @@ class _ServerOption extends StatelessWidget {
 
     return Material(
       color: selected
-          ? colors.primary.withValues(alpha: 0.08)
+          ? colors.primary.withValues(alpha: 0.16)
           : Colors.transparent,
-      borderRadius: BorderRadius.circular(12),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+        side: selected
+            ? BorderSide(color: colors.primary.withValues(alpha: 0.7))
+            : BorderSide.none,
+      ),
       child: InkWell(
         onTap: enabled ? onTap : null,
         borderRadius: BorderRadius.circular(12),
@@ -2175,13 +2378,6 @@ class _ServerOption extends StatelessWidget {
                   size: 19,
                   color: favorite ? colors.primary : colors.onSurfaceVariant,
                 ),
-              ),
-              Icon(
-                selected
-                    ? Icons.check_circle_rounded
-                    : Icons.radio_button_unchecked_rounded,
-                size: 20,
-                color: selected ? colors.primary : colors.outline,
               ),
             ],
           ),

@@ -33,8 +33,11 @@ done
 /usr/bin/install -o root -g wheel -m 0755 "$RESOURCE_DIRECTORY/vpn-helper" "$SUPPORT_DIRECTORY/vpn-helper"
 /usr/bin/install -o root -g wheel -m 0755 "$RESOURCE_DIRECTORY/xray" "$SUPPORT_DIRECTORY/xray"
 /usr/bin/install -d -o root -g wheel -m 0755 "$SUPPORT_DIRECTORY/assets"
+/usr/bin/install -d -o root -g wheel -m 0755 "$SUPPORT_DIRECTORY/default-assets"
 /usr/bin/install -o root -g wheel -m 0644 "$RESOURCE_DIRECTORY/geoip.dat" "$SUPPORT_DIRECTORY/assets/geoip.dat"
 /usr/bin/install -o root -g wheel -m 0644 "$RESOURCE_DIRECTORY/geosite.dat" "$SUPPORT_DIRECTORY/assets/geosite.dat"
+/usr/bin/install -o root -g wheel -m 0644 "$RESOURCE_DIRECTORY/geoip.dat" "$SUPPORT_DIRECTORY/default-assets/geoip.dat"
+/usr/bin/install -o root -g wheel -m 0644 "$RESOURCE_DIRECTORY/geosite.dat" "$SUPPORT_DIRECTORY/default-assets/geosite.dat"
 /usr/bin/install -o root -g wheel -m 0644 "$RESOURCE_DIRECTORY/com.oksana1984.oksanaVpnDesktop.daemon.plist" "$PLIST_PATH"
 
 printf '%s\n' "$owner_uid" > "$SUPPORT_DIRECTORY/control-owner-uid"

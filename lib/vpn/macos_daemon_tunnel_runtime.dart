@@ -3,7 +3,12 @@ import 'dart:convert';
 import 'dart:ffi';
 import 'dart:io';
 
+import '../models/local_socks_auth_settings.dart';
 import '../models/subscription_profile.dart';
+import '../models/vpn_routing_settings.dart';
+import '../services/routing_geo_data_loader.dart';
+import '../services/xray_global_dns_configuration.dart';
+import '../services/xray_routing_configuration.dart';
 import 'vpn_runtime.dart';
 
 class MacosDaemonTunnelRuntime implements VpnRuntime {
@@ -39,7 +44,14 @@ class MacosDaemonTunnelRuntime implements VpnRuntime {
       Abi.current() == Abi.macosArm64;
 
   @override
-  Future<void> connect(SubscriptionProfile profile, VpnMode mode) async {
+  Future<void> connect(
+    SubscriptionProfile profile,
+    VpnMode mode, {
+    VpnRoutingSettings routingSettings = const VpnRoutingSettings(),
+    GlobalDnsSettings globalDnsSettings = const GlobalDnsSettings(),
+    LocalSocksAuthSettings localSocksAuthSettings =
+        const LocalSocksAuthSettings(),
+  }) async {
     if (!supports(mode)) {
       throw const VpnRuntimeException(
           'Режим TUN недоступен на этом устройстве.');
@@ -53,11 +65,20 @@ class MacosDaemonTunnelRuntime implements VpnRuntime {
     _errorMessage = null;
     _publish();
     try {
-      final configuration = jsonEncode(_prepareConfiguration(profile));
+      final rawGeoData = routingSettings.enabled
+          ? await RoutingGeoDataLoader.download(routingSettings.activeTemplate)
+          : const <String, List<int>>{};
+      final geoData = rawGeoData.map(
+        (key, bytes) => MapEntry(key, base64Encode(bytes)),
+      );
+      final configuration = jsonEncode(
+        _prepareConfiguration(profile, routingSettings, globalDnsSettings),
+      );
       await _ensureServiceInstalled();
       final response = await _request({
         'command': 'start',
         'configuration': configuration,
+        ...geoData,
       });
       _applyStatus(response['state'] as String? ?? 'running');
       _startStatusPolling();
@@ -107,7 +128,11 @@ class MacosDaemonTunnelRuntime implements VpnRuntime {
     }
   }
 
-  Map<String, dynamic> _prepareConfiguration(SubscriptionProfile profile) {
+  Map<String, dynamic> _prepareConfiguration(
+    SubscriptionProfile profile,
+    VpnRoutingSettings routingSettings,
+    GlobalDnsSettings globalDnsSettings,
+  ) {
     final configuration =
         jsonDecode(jsonEncode(profile.toRuntimeConfiguration()))
             as Map<String, dynamic>;
@@ -131,6 +156,32 @@ class MacosDaemonTunnelRuntime implements VpnRuntime {
       }
     }
 
+    final sniffing = existingSniffing ??
+        <String, dynamic>{
+          'enabled': true,
+          'destOverride': ['http', 'tls', 'quic'],
+        };
+    final needsDomainSniffing = routingSettings.enabled &&
+        (routingSettings.activeTemplate.usesFakeDns ||
+            routingSettings.activeTemplate.rules
+                .any((rule) => rule.hasDomainTarget));
+    if (needsDomainSniffing) {
+      final overrides = sniffing['destOverride'] is List
+          ? (sniffing['destOverride'] as List).whereType<String>().toList()
+          : <String>[];
+      for (final protocol in ['http', 'tls', 'quic']) {
+        if (!overrides.contains(protocol)) overrides.add(protocol);
+      }
+      if (routingSettings.activeTemplate.usesFakeDns &&
+          !overrides.contains('fakedns')) {
+        overrides.add('fakedns');
+      }
+      sniffing
+        ..['enabled'] = true
+        ..['routeOnly'] = true
+        ..['destOverride'] = overrides;
+    }
+
     configuration['inbounds'] = [
       {
         'tag': 'oksana-tun',
@@ -141,11 +192,7 @@ class MacosDaemonTunnelRuntime implements VpnRuntime {
           'autoSystemRoutingTable': ['0.0.0.0/0', '::/0'],
           'autoOutboundsInterface': 'auto',
         },
-        'sniffing': existingSniffing ??
-            {
-              'enabled': true,
-              'destOverride': ['http', 'tls', 'quic'],
-            },
+        'sniffing': sniffing,
       },
     ];
 
@@ -167,13 +214,27 @@ class MacosDaemonTunnelRuntime implements VpnRuntime {
         }
       }
     }
+
+    if (routingSettings.enabled) {
+      XrayRoutingConfiguration.apply(
+        configuration,
+        routingSettings,
+        inboundTags: const ['oksana-tun'],
+      );
+    }
+    XrayGlobalDnsConfiguration.apply(
+      configuration,
+      globalDnsSettings,
+      routingSettings: routingSettings,
+      inboundTags: const ['oksana-tun'],
+    );
     return configuration;
   }
 
   Future<void> _ensureServiceInstalled() async {
     try {
-      await _request({'command': 'status'});
-      return;
+      final status = await _request({'command': 'status'});
+      if (status['apiVersion'] == 2) return;
     } on SocketException {
       // The first TUN connection installs the helper through one macOS
       // administrator authorization prompt.
@@ -216,8 +277,8 @@ end run
     // Give launchd a moment to start the newly registered root helper.
     for (var attempt = 0; attempt < 20; attempt++) {
       try {
-        await _request({'command': 'status'});
-        return;
+        final status = await _request({'command': 'status'});
+        if (status['apiVersion'] == 2) return;
       } on SocketException {
         await Future<void>.delayed(const Duration(milliseconds: 250));
       }

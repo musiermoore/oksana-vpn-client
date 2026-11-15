@@ -1,5 +1,7 @@
 import Cocoa
 import FlutterMacOS
+import UniformTypeIdentifiers
+import Vision
 
 @main
 class AppDelegate: FlutterAppDelegate {
@@ -45,6 +47,39 @@ class AppDelegate: FlutterAppDelegate {
           return
         }
         result(NSWorkspace.shared.open(url))
+        return
+      }
+
+      if call.method == "readRoutingTemplateFile" {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [UTType.json, UTType.plainText, UTType.image]
+        panel.allowsOtherFileTypes = true
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Импортировать"
+        panel.message = "Выберите JSON-файл с шаблоном маршрутизации"
+        guard panel.runModal() == .OK, let url = panel.url else {
+          result(FlutterError(code: "cancelled", message: nil, details: nil))
+          return
+        }
+        do {
+          if ["png", "jpg", "jpeg", "heic", "tiff", "bmp"].contains(url.pathExtension.lowercased()) {
+            let request = VNDetectBarcodesRequest()
+            request.symbologies = [.qr]
+            try VNImageRequestHandler(url: url).perform([request])
+            guard let payload = request.results?.first?.payloadStringValue else {
+              result(FlutterError(code: "qr_not_found", message: "В изображении не найден QR-код.", details: nil))
+              return
+            }
+            result(payload)
+            return
+          }
+          let contents = try String(contentsOf: url, encoding: .utf8)
+          result(contents)
+        } catch {
+          result(FlutterError(code: "read_failed", message: "Не удалось прочитать файл.", details: nil))
+        }
         return
       }
 

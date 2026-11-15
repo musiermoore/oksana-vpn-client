@@ -22,7 +22,7 @@ class BrandHeader extends StatelessWidget {
           height: 48,
           decoration: BoxDecoration(
             gradient: const LinearGradient(
-                colors: [AppTheme.primary, Color(0xFF8B5CF6)]),
+                colors: [AppTheme.primary, Color(0xFFA855F7)]),
             borderRadius: BorderRadius.circular(15),
             boxShadow: [
               BoxShadow(

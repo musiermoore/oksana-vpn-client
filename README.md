@@ -38,7 +38,7 @@ The first time they turn on TUN, macOS shows one administrator authorization pro
 
 ## Architecture and limitations
 
-The UUID is stored in macOS Keychain via `flutter_secure_storage`; fetched profiles stay in memory. The helper communicates only with the installing user through a permission-restricted local Unix socket. It changes and restores system DNS while the tunnel runs; Xray adds and removes system routes.
+The UUID is stored in macOS Keychain via `flutter_secure_storage`; fetched profiles stay in memory. The helper communicates only with the installing user through a permission-restricted local Unix socket. It changes and restores system DNS while the tunnel runs; Xray adds and removes system routes. A global DNS provider can be selected in Settings for TUN, while DNS configured by the active routing template takes precedence.
 
 TUN uses direct route-table management rather than Apple's Network Extension. The helper checks that Xray creates a new `utun` interface before reporting the tunnel as running, but real traffic, DNS leak, sleep/wake, crash recovery, and stale-route behavior still require a smoke test on the target Mac. See [docs/macos-tunnel.md](docs/macos-tunnel.md) and [docs/architecture.md](docs/architecture.md).
 
