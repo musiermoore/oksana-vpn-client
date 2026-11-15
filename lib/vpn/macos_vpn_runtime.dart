@@ -66,6 +66,14 @@ class MacosVpnRuntime implements VpnRuntime, VpnConnectivityProbe {
     LocalSocksAuthSettings localSocksAuthSettings =
         const LocalSocksAuthSettings(),
   }) async {
+    if (routingSettings.enabled &&
+        routingSettings.activeTemplate.rules
+            .any((rule) => rule.hasProcessTarget)) {
+      throw const VpnRuntimeException(
+        'Xray не поддерживает маршрутизацию по процессам в текущей версии macOS-клиента. Используйте правила по сайтам, IP и портам.',
+      );
+    }
+
     final runtime = switch (mode) {
       VpnMode.proxy => _proxy,
       VpnMode.tun => _tunnel,

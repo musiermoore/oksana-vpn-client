@@ -200,7 +200,8 @@ class XrayRoutingConfiguration {
         rule.ips.isNotEmpty ||
         rule.ports.isNotEmpty ||
         rule.networks.isNotEmpty ||
-        rule.protocols.isNotEmpty;
+        rule.protocols.isNotEmpty ||
+        rule.processes.isNotEmpty;
     final domains = rule.domains.isNotEmpty
         ? rule.domains
         : !hasStructuredConditions && rule.type == RoutingTargetType.domain
@@ -214,6 +215,11 @@ class XrayRoutingConfiguration {
     final ports = rule.ports.isNotEmpty
         ? rule.ports
         : !hasStructuredConditions && rule.type == RoutingTargetType.port
+            ? [rule.value]
+            : const <String>[];
+    final processes = rule.processes.isNotEmpty
+        ? rule.processes
+        : !hasStructuredConditions && rule.type == RoutingTargetType.process
             ? [rule.value]
             : const <String>[];
     return <String, dynamic>{
@@ -232,6 +238,7 @@ class XrayRoutingConfiguration {
       if (ports.isNotEmpty) 'port': ports.join(','),
       if (rule.networks.isNotEmpty) 'network': rule.networks.join(','),
       if (rule.protocols.isNotEmpty) 'protocol': rule.protocols,
+      if (processes.isNotEmpty) 'process': processes,
     };
   }
 

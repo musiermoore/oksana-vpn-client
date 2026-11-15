@@ -15,6 +15,7 @@ enum RoutingTargetType {
   domain,
   ip,
   port,
+  process,
 }
 
 enum RoutingDnsProvider {
@@ -111,6 +112,7 @@ class VpnRoutingRule {
     this.ports = const [],
     this.networks = const [],
     this.protocols = const [],
+    this.processes = const [],
   });
 
   final RoutingTargetType type;
@@ -125,9 +127,13 @@ class VpnRoutingRule {
   final List<String> ports;
   final List<String> networks;
   final List<String> protocols;
+  final List<String> processes;
 
   bool get hasDomainTarget =>
       domains.isNotEmpty || type == RoutingTargetType.domain;
+
+  bool get hasProcessTarget =>
+      processes.isNotEmpty || type == RoutingTargetType.process;
 
   String get displayValue {
     final terms = <String>[
@@ -136,6 +142,7 @@ class VpnRoutingRule {
       ...ports.map((port) => 'порт $port'),
       ...networks.map((network) => 'сеть $network'),
       ...protocols.map((protocol) => 'протокол $protocol'),
+      ...processes.map((process) => 'процесс $process'),
     ];
     if (terms.isNotEmpty) return terms.join(' · ');
     return value;
@@ -151,6 +158,7 @@ class VpnRoutingRule {
         if (ports.isNotEmpty) 'ports': ports,
         if (networks.isNotEmpty) 'networks': networks,
         if (protocols.isNotEmpty) 'protocols': protocols,
+        if (processes.isNotEmpty) 'processes': processes,
       };
 
   static VpnRoutingRule? fromJson(Object? value) {
@@ -173,6 +181,7 @@ class VpnRoutingRule {
       ports: _stringList(value['ports']),
       networks: _stringList(value['networks']),
       protocols: _stringList(value['protocols']),
+      processes: _stringList(value['processes']),
     );
   }
 }

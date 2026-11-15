@@ -3,7 +3,7 @@
 ## Проекты
 
 - `../oksana-vpn-ui` — действующий Vue 3 SPA для Web и Telegram Mini App. Он остаётся рабочим и используется как дизайн-референс и источник API-контрактов.
-- `oksana-vpn-desktop` — Flutter-приложение для macOS. В перспективе это же Flutter-приложение сможет получить Web target; отдельное приложение `flutter/` рядом с `desktop/` не нужно.
+- `oksana-vpn-desktop` — Flutter desktop-приложение. В репозитории есть macOS ARM64 runtime и Windows runner для сборки Flutter shell; VPN runtime для Windows ещё не реализован. Отдельное приложение `flutter/` рядом с `desktop/` не нужно.
 - Нативная macOS интеграция находится в Flutter host/plugin слое. Выделять отдельный Rust service можно позже, если появится требование переиспользовать VPN engine несколькими клиентами.
 
 ## Экраны
@@ -43,6 +43,12 @@ Security follow-up before production: the current backend `VlessConfigController
 UI screens depend on a small typed `VpnRuntime` contract. The first runtime supports macOS local proxy mode and reports runtime status to the UI. Profile models and state names should not embed OS-specific details. Add Windows/Linux implementations later without adding dummy implementations now.
 
 Proxy mode starts the local Xray listeners from the returned profile. It does not change macOS system proxy settings automatically.
+
+Routing templates can match `process` names in addition to domain/IP/port and other supported conditions. Rules retain Xray's AND semantics when imported conditions are combined. On Windows, use the executable process name (the `.exe` suffix is optional and matching is case-sensitive); the template default route can be set to direct for VPN-only-listed apps or proxy for VPN-except-listed apps. Xray's current routing documentation lists process matching for Windows and Linux, not macOS, so the macOS runtime refuses to start an enabled template containing process rules. The Windows rule model and JSON generation are in place, but a Windows `VpnRuntime` is not.
+
+## Windows build path
+
+The repository includes Flutter's generated Windows runner and a PowerShell release script. Build on Windows with Flutter 3.35.7 and Visual Studio 2022's **Desktop development with C++** workload using `./scripts/build-windows.ps1 -Architecture x64`. It packages the Flutter output into a ZIP and does not bundle Xray or implement Windows VPN controls yet. GitHub Actions can produce the same build on a Windows runner when started manually or on a `v*` tag.
 
 ## macOS TUN runtime
 

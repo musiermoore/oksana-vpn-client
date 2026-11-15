@@ -124,7 +124,8 @@ class RoutingTemplateImporter {
         rule.ips.isNotEmpty ||
         rule.ports.isNotEmpty ||
         rule.networks.isNotEmpty ||
-        rule.protocols.isNotEmpty;
+        rule.protocols.isNotEmpty ||
+        rule.processes.isNotEmpty;
     final domains = rule.domains.isNotEmpty
         ? rule.domains
         : !hasStructuredConditions && rule.type == RoutingTargetType.domain
@@ -138,6 +139,11 @@ class RoutingTemplateImporter {
     final ports = rule.ports.isNotEmpty
         ? rule.ports
         : !hasStructuredConditions && rule.type == RoutingTargetType.port
+            ? [rule.value]
+            : const <String>[];
+    final processes = rule.processes.isNotEmpty
+        ? rule.processes
+        : !hasStructuredConditions && rule.type == RoutingTargetType.process
             ? [rule.value]
             : const <String>[];
     return {
@@ -155,6 +161,7 @@ class RoutingTemplateImporter {
       if (ports.isNotEmpty) 'port': ports.join(','),
       if (rule.networks.isNotEmpty) 'network': rule.networks.join(','),
       if (rule.protocols.isNotEmpty) 'protocol': rule.protocols,
+      if (processes.isNotEmpty) 'process': processes,
       'outboundTag': _outboundName(rule.action),
     };
   }
@@ -558,11 +565,13 @@ class RoutingTemplateImporter {
           .where((network) => network.isNotEmpty)
           .toList(growable: false);
       final protocols = _readConditions(rawRule['protocol']);
+      final processes = _readConditions(rawRule['process']);
       if (domains.isEmpty &&
           ips.isEmpty &&
           ports.isEmpty &&
           networks.isEmpty &&
-          protocols.isEmpty) {
+          protocols.isEmpty &&
+          processes.isEmpty) {
         const metadata = {
           'type',
           'outboundTag',
@@ -581,6 +590,7 @@ class RoutingTemplateImporter {
       if (domains.isEmpty &&
           ips.isEmpty &&
           ports.isEmpty &&
+          processes.isEmpty &&
           protocols.isEmpty &&
           networks.toSet().containsAll({'tcp', 'udp'}) &&
           rawRule.keys.every((key) =>
@@ -603,7 +613,6 @@ class RoutingTemplateImporter {
         'localIP',
         'user',
         'attrs',
-        'process',
         'inboundTag',
       ];
       if (unsupported.any(rawRule.containsKey)) {
@@ -615,13 +624,16 @@ class RoutingTemplateImporter {
           ? RoutingTargetType.domain
           : ips.isNotEmpty
               ? RoutingTargetType.ip
-              : RoutingTargetType.port;
+              : ports.isNotEmpty
+                  ? RoutingTargetType.port
+                  : RoutingTargetType.process;
       final display = [
         ...domains,
         ...ips,
         ...ports,
         ...networks,
         ...protocols,
+        ...processes,
       ].join(' · ');
       rules.add(VpnRoutingRule(
         type: type,
@@ -633,6 +645,7 @@ class RoutingTemplateImporter {
         ports: ports,
         networks: networks,
         protocols: protocols,
+        processes: processes,
       ));
     }
 

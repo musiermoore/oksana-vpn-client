@@ -1,6 +1,6 @@
 # Oksana VPN Desktop
 
-Flutter desktop client, currently prepared for macOS ARM64. The Vue application in `../oksana-vpn-ui` remains the Web and Telegram Mini App; this project uses it as a design and API reference.
+Flutter desktop client. The macOS ARM64 VPN runtime is implemented; a Windows Flutter runner and release build path are included, while the Windows VPN runtime is still to be implemented. The Vue application in `../oksana-vpn-ui` remains the Web and Telegram Mini App; this project uses it as a design and API reference.
 
 ## Current scope
 
@@ -8,6 +8,7 @@ Flutter desktop client, currently prepared for macOS ARM64. The Vue application 
 - Server/profile selection and VPN controls.
 - Local Xray SOCKS/HTTP proxy mode. It does not change macOS-wide proxy settings.
 - TUN mode through Xray's macOS `utun` inbound, controlled by a root LaunchDaemon.
+- Xray routing templates with domain, IP, port, and process rules. Process rules are serialized for Xray on Windows/Linux; the current macOS client reports them as unsupported.
 
 ## Run locally
 
@@ -25,6 +26,24 @@ Override the subscription endpoint at build time if needed:
 ```sh
 flutter run -d macos --dart-define=SUBSCRIPTION_ENDPOINT=https://connect.oksana1984.ru/start
 ```
+
+## Build a Windows release bundle
+
+Windows executables must be compiled on Windows. Install Flutter 3.35.7 and Visual Studio 2022 with the **Desktop development with C++** workload, then run PowerShell from the repository:
+
+```powershell
+./scripts/build-windows.ps1 -Architecture x64
+```
+
+The script writes `build/release/oksana-vpn-windows-x64.zip`. The same build runs on GitHub Actions through **Windows release build** (manually from Actions or when a `v*` tag is pushed).
+
+This currently builds the Flutter application shell. The Windows `VpnRuntime` and Xray process/service packaging are not implemented, so this artifact is not yet a working Windows VPN client. Windows ARM64 and installer signing are also still future work.
+
+## Process routing
+
+In a routing template, add an **Application** rule and enter the process name, such as `chrome` or `Telegram`. Xray matches process names case-sensitively; on Windows its process matcher treats `chrome` and `chrome.exe` as the same name. Choose **Direct** to exclude an app while the template's default is **VPN**, or choose **VPN** for an app while the default is **Direct**. The built-in presets **VPN except listed** and **VPN only listed** set those defaults for all listed rules.
+
+Xray documents process matching for Windows and Linux. The current macOS client rejects enabled templates with process rules because its Xray process lookup is unsupported there. See [Xray routing](https://github.com/XTLS/Xray-docs-next/blob/main/docs/en/config/routing.md#ruleobject).
 
 ## First use on a friend's Mac
 

@@ -689,7 +689,8 @@ class _RoutingTemplateDetailScreenState
         original.ips.isNotEmpty ||
         original.ports.isNotEmpty ||
         original.networks.isNotEmpty ||
-        original.protocols.isNotEmpty;
+        original.protocols.isNotEmpty ||
+        original.processes.isNotEmpty;
     final updated = await showDialog<VpnRoutingRule>(
       context: context,
       builder: (_) => structured
@@ -816,6 +817,7 @@ class _RoutingTemplateDetailScreenState
                 ports: rule.ports,
                 networks: rule.networks,
                 protocols: rule.protocols,
+                processes: rule.processes,
               ))
           .toList(growable: false),
     ));
@@ -1735,6 +1737,7 @@ IconData _targetIcon(RoutingTargetType type) => switch (type) {
       RoutingTargetType.domain => Icons.language_rounded,
       RoutingTargetType.ip => Icons.dns_rounded,
       RoutingTargetType.port => Icons.settings_ethernet_rounded,
+      RoutingTargetType.process => Icons.apps_rounded,
     };
 
 class _AddRoutingRuleDialog extends StatefulWidget {
@@ -1785,6 +1788,10 @@ class _AddRoutingRuleDialogState extends State<_AddRoutingRuleDialog> {
       RoutingTargetType.port => _isValidPortOrRange(value)
           ? null
           : 'Введите порт от 1 до 65535 или диапазон, например 8000-8100.',
+      RoutingTargetType.process =>
+        value.length <= 1024 && !value.contains(RegExp(r'[\r\n\x00-\x1f]'))
+            ? null
+            : 'Введите имя одного процесса без переносов строк.',
     };
   }
 
@@ -1841,6 +1848,11 @@ class _AddRoutingRuleDialogState extends State<_AddRoutingRuleDialog> {
           '443 или 8000-8100',
           'Порт применяется к любому адресу, для TCP и UDP.',
         ),
+      RoutingTargetType.process => (
+          'Имя процесса',
+          'chrome или Telegram',
+          'Windows и Linux: точное имя процесса, регистр учитывается; .exe можно не указывать. В macOS текущая версия Xray не поддерживает поиск процессов.',
+        ),
     };
     return AlertDialog(
       title: Text(widget.rule == null ? 'Новое правило' : 'Изменить правило'),
@@ -1877,7 +1889,7 @@ class _AddRoutingRuleDialogState extends State<_AddRoutingRuleDialog> {
             const SizedBox(height: 8),
             Align(
               alignment: Alignment.centerLeft,
-              child: Text('Тип адреса',
+              child: Text('Тип правила',
                   style: Theme.of(context).textTheme.labelLarge),
             ),
             const SizedBox(height: 4),
@@ -1895,6 +1907,11 @@ class _AddRoutingRuleDialogState extends State<_AddRoutingRuleDialog> {
                     RoutingTargetType.port,
                     'Порт',
                     Icons.settings_ethernet_rounded,
+                  ),
+                  (
+                    RoutingTargetType.process,
+                    'Приложение',
+                    Icons.apps_rounded,
                   ),
                 ])
                   _RoutingChoiceChip(
@@ -1951,6 +1968,8 @@ class _EditStructuredRuleDialogState extends State<_EditStructuredRuleDialog> {
       TextEditingController(text: widget.rule.networks.join(', '));
   late final _protocols =
       TextEditingController(text: widget.rule.protocols.join(', '));
+  late final _processes =
+      TextEditingController(text: widget.rule.processes.join('\n'));
   late RoutingAction _action = widget.rule.action;
   String? _error;
 
@@ -1961,6 +1980,7 @@ class _EditStructuredRuleDialogState extends State<_EditStructuredRuleDialog> {
     _ports.dispose();
     _networks.dispose();
     _protocols.dispose();
+    _processes.dispose();
     super.dispose();
   }
 
@@ -1982,7 +2002,15 @@ class _EditStructuredRuleDialogState extends State<_EditStructuredRuleDialog> {
     final ports = _lines(_ports);
     final networks = _items(_networks);
     final protocols = _items(_protocols);
-    final values = [...domains, ...ips, ...ports, ...networks, ...protocols];
+    final processes = _lines(_processes);
+    final values = [
+      ...domains,
+      ...ips,
+      ...ports,
+      ...networks,
+      ...protocols,
+      ...processes,
+    ];
     if (values.isEmpty) {
       setState(() => _error = 'Укажите хотя бы одно условие.');
       return;
@@ -1996,7 +2024,9 @@ class _EditStructuredRuleDialogState extends State<_EditStructuredRuleDialog> {
           ? RoutingTargetType.domain
           : ips.isNotEmpty
               ? RoutingTargetType.ip
-              : RoutingTargetType.port,
+              : ports.isNotEmpty
+                  ? RoutingTargetType.port
+                  : RoutingTargetType.process,
       value: values.join(' · '),
       action: _action,
       label: widget.rule.label,
@@ -2005,6 +2035,7 @@ class _EditStructuredRuleDialogState extends State<_EditStructuredRuleDialog> {
       ports: ports,
       networks: networks,
       protocols: protocols,
+      processes: processes,
     ));
   }
 
@@ -2042,7 +2073,7 @@ class _EditStructuredRuleDialogState extends State<_EditStructuredRuleDialog> {
               ),
               const SizedBox(height: 12),
               Text(
-                  'Условия разных типов должны совпасть одновременно. Каждый сайт, IP или порт укажите с новой строки.',
+                  'Условия разных типов должны совпасть одновременно. Каждый сайт, IP, порт или процесс укажите с новой строки.',
                   style: Theme.of(context).textTheme.bodySmall),
               TextField(
                   controller: _domains,
@@ -2069,6 +2100,16 @@ class _EditStructuredRuleDialogState extends State<_EditStructuredRuleDialog> {
                   controller: _protocols,
                   decoration: const InputDecoration(
                       labelText: 'Протоколы', hintText: 'http, tls, quic')),
+              TextField(
+                  controller: _processes,
+                  minLines: 1,
+                  maxLines: 4,
+                  decoration: const InputDecoration(
+                    labelText: 'Процессы',
+                    hintText: 'chrome, Telegram',
+                    helperText:
+                        'Windows/Linux: точные имена; .exe можно не указывать.',
+                  )),
               if (_error != null)
                 Padding(
                     padding: const EdgeInsets.only(top: 8),
