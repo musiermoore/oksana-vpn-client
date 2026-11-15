@@ -2,6 +2,9 @@ import 'dart:convert';
 import 'dart:math';
 
 class LocalSocksAuthSettings {
+  static const _credentialAlphabet =
+      'abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+
   const LocalSocksAuthSettings({
     this.enabled = false,
     this.username = '',
@@ -13,18 +16,25 @@ class LocalSocksAuthSettings {
   final String password;
 
   static LocalSocksAuthSettings createSecureDefault() {
-    const alphabet =
-        'abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789';
     final random = Random.secure();
     final password = List.generate(
       24,
-      (_) => alphabet[random.nextInt(alphabet.length)],
+      (_) => _credentialAlphabet[random.nextInt(_credentialAlphabet.length)],
     ).join();
     return LocalSocksAuthSettings(
       enabled: true,
-      username: 'oksana',
+      username: createRandomUsername(),
       password: password,
     );
+  }
+
+  static String createRandomUsername() {
+    final random = Random.secure();
+    final suffix = List.generate(
+      16,
+      (_) => _credentialAlphabet[random.nextInt(_credentialAlphabet.length)],
+    ).join();
+    return 'oksana_$suffix';
   }
 
   LocalSocksAuthSettings copyWith({

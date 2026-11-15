@@ -63,7 +63,15 @@ class AppSettingsStore {
   Future<LocalSocksAuthSettings> readLocalSocksAuthSettings() async {
     final value = await SecureAppStateStore.read(_localSocksAuthSettingsKey);
     if (value != null && value.isNotEmpty) {
-      return LocalSocksAuthSettings.decode(value);
+      final settings = LocalSocksAuthSettings.decode(value);
+      if (settings.username == 'oksana') {
+        final migrated = settings.copyWith(
+          username: LocalSocksAuthSettings.createRandomUsername(),
+        );
+        await saveLocalSocksAuthSettings(migrated);
+        return migrated;
+      }
+      return settings;
     }
 
     // Keep existing Proxy users working after upgrading. Fresh installs get
