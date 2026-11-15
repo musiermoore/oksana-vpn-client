@@ -21,8 +21,8 @@ class XrayGlobalDnsConfiguration {
       return;
     }
 
-    final server = settings.server;
-    if (server == null || server.isEmpty) {
+    final upstreams = settings.upstreams;
+    if (upstreams.isEmpty) {
       throw const VpnRuntimeException('Не указан адрес глобального DNS.');
     }
 
@@ -35,21 +35,23 @@ class XrayGlobalDnsConfiguration {
     final fakeDnsServers = existingServers.where(_isFakeDns).toList();
     dns['servers'] = [
       ...fakeDnsServers,
-      {'address': server, 'tag': _dnsServerTag},
+      ...upstreams.map((upstream) => {
+            'address': upstream.server,
+            'tag': _dnsServerTag,
+          }),
     ];
+    if (settings.usesCloudflareAndGoogle) {
+      dns
+        ..['disableFallback'] = false
+        ..['disableFallbackIfMatch'] = false
+        ..['enableParallelQuery'] = false;
+    }
 
     final hosts = dns['hosts'] is Map
         ? Map<String, dynamic>.from(dns['hosts'] as Map)
         : <String, dynamic>{};
-    final bootstrapIp = settings.bootstrapIp;
-    final uri = Uri.tryParse(server);
-    if (bootstrapIp != null &&
-        uri != null &&
-        uri.hasAuthority &&
-        uri.host.isNotEmpty &&
-        !uri.host.contains(':') &&
-        !RegExp(r'^\d{1,3}(\.\d{1,3}){3}$').hasMatch(uri.host)) {
-      hosts.putIfAbsent(uri.host, () => bootstrapIp);
+    for (final upstream in upstreams) {
+      _addBootstrapHost(hosts, upstream);
     }
     if (hosts.isNotEmpty) dns['hosts'] = hosts;
     configuration['dns'] = dns;
@@ -135,6 +137,22 @@ class XrayGlobalDnsConfiguration {
 
   static bool _isFakeDns(Object? server) =>
       server == 'fakedns' || (server is Map && server['address'] == 'fakedns');
+
+  static void _addBootstrapHost(
+    Map<String, dynamic> hosts,
+    GlobalDnsUpstream upstream,
+  ) {
+    final bootstrapIp = upstream.bootstrapIp;
+    final uri = Uri.tryParse(upstream.server);
+    if (bootstrapIp != null &&
+        uri != null &&
+        uri.hasAuthority &&
+        uri.host.isNotEmpty &&
+        !uri.host.contains(':') &&
+        !RegExp(r'^\d{1,3}(\.\d{1,3}){3}$').hasMatch(uri.host)) {
+      hosts.putIfAbsent(uri.host, () => bootstrapIp);
+    }
+  }
 
   static bool _isDnsInterceptionRule(Map rule) {
     final port = rule['port'];

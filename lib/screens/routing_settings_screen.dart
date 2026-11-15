@@ -1297,6 +1297,7 @@ class _RoutingDnsSettingsDialogState extends State<_RoutingDnsSettingsDialog> {
             border: OutlineInputBorder(),
           ),
           items: RoutingDnsProvider.values
+              .where((item) => item != RoutingDnsProvider.cloudflareGoogle)
               .map((item) => DropdownMenuItem(
                     value: item,
                     child: Text(_dnsProviderLabel(item)),
@@ -1417,6 +1418,7 @@ String _dnsProviderLabel(RoutingDnsProvider provider) => switch (provider) {
       RoutingDnsProvider.internal => 'Внутренний (из профиля)',
       RoutingDnsProvider.google => 'Google',
       RoutingDnsProvider.cloudflare => 'Cloudflare',
+      RoutingDnsProvider.cloudflareGoogle => 'Cloudflare + Google',
       RoutingDnsProvider.quad9 => 'Quad9',
       RoutingDnsProvider.adguard => 'AdGuard',
       RoutingDnsProvider.custom => 'Свой DNS',

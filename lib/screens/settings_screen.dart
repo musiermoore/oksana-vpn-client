@@ -7,6 +7,7 @@ import '../app_theme.dart';
 import '../models/local_socks_auth_settings.dart';
 import '../models/vpn_routing_settings.dart';
 import '../vpn/vpn_runtime.dart';
+import 'appearance_settings_screen.dart';
 import 'routing_settings_screen.dart';
 
 class SettingsScreen extends StatefulWidget {
@@ -76,6 +77,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
   void _selectThemeMode(ThemeMode mode) {
     setState(() => _themeMode = mode);
     widget.onThemeModeChanged(mode);
+  }
+
+  Future<void> _openAppearanceSettings() async {
+    final mode = await Navigator.of(context).push<ThemeMode>(
+      MaterialPageRoute<ThemeMode>(
+        builder: (_) => AppearanceSettingsScreen(themeMode: _themeMode),
+      ),
+    );
+    if (mode == null || !mounted || mode == _themeMode) return;
+    _selectThemeMode(mode);
   }
 
   Future<void> _openRoutingSettings() async {
@@ -259,7 +270,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   ],
                   const SizedBox(height: 24),
                   Text(
-                    'DNS для TUN',
+                    'Внешний вид',
                     style: theme.textTheme.titleMedium
                         ?.copyWith(fontWeight: FontWeight.w700),
                   ),
@@ -267,36 +278,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   Card(
                     clipBehavior: Clip.antiAlias,
                     child: ListTile(
-                      enabled: canChange && widget.supportsTun,
-                      onTap: canChange && widget.supportsTun
-                          ? _openGlobalDnsSettings
-                          : null,
-                      leading: Icon(Icons.dns_rounded,
-                          color: widget.supportsTun
-                              ? theme.colorScheme.primary
-                              : theme.colorScheme.onSurfaceVariant),
-                      title: const Text('Системный DNS'),
-                      subtitle: Text(
-                        '${_globalDnsProviderLabel(_globalDnsSettings.provider)} · ${_globalDnsSettings.provider == RoutingDnsProvider.internal ? 'DNS выбранного профиля' : 'общий DNS для системного трафика'}',
-                      ),
+                      onTap: _openAppearanceSettings,
+                      leading: Icon(Icons.palette_outlined,
+                          color: theme.colorScheme.primary),
+                      title: const Text('Тема приложения'),
+                      subtitle: Text(_themeModeLabel(_themeMode)),
                       trailing: const Icon(Icons.chevron_right_rounded),
                     ),
                   ),
-                  const SizedBox(height: 4),
-                  Text(
-                    'Применяется в режиме TUN. Если маршрутизация включена, DNS её активного шаблона имеет приоритет.',
-                    style: theme.textTheme.bodySmall?.copyWith(
-                      color: theme.colorScheme.onSurfaceVariant,
-                    ),
-                  ),
-                  const SizedBox(height: 24),
-                  Text(
-                    'Локальный SOCKS5',
-                    style: theme.textTheme.titleMedium
-                        ?.copyWith(fontWeight: FontWeight.w700),
-                  ),
-                  const SizedBox(height: 8),
-                  _buildLocalSocksAuthCard(theme, canChange, phase),
                   const SizedBox(height: 24),
                   Text(
                     'Маршрутизация',
@@ -333,30 +322,44 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   ],
                   const SizedBox(height: 24),
                   Text(
-                    'Внешний вид',
+                    'DNS',
                     style: theme.textTheme.titleMedium
                         ?.copyWith(fontWeight: FontWeight.w700),
                   ),
                   const SizedBox(height: 8),
-                  SegmentedButton<ThemeMode>(
-                    showSelectedIcon: false,
-                    segments: const [
-                      ButtonSegment(
-                          value: ThemeMode.system, label: Text('Система')),
-                      ButtonSegment(
-                          value: ThemeMode.light, label: Text('Светлая')),
-                      ButtonSegment(
-                          value: ThemeMode.dark, label: Text('Тёмная')),
-                    ],
-                    selected: {_themeMode},
-                    onSelectionChanged: (value) =>
-                        _selectThemeMode(value.first),
-                    style: segmentedStyle.copyWith(
-                      padding: WidgetStateProperty.all(
-                        const EdgeInsets.symmetric(horizontal: 8),
+                  Card(
+                    clipBehavior: Clip.antiAlias,
+                    child: ListTile(
+                      enabled: canChange && widget.supportsTun,
+                      onTap: canChange && widget.supportsTun
+                          ? _openGlobalDnsSettings
+                          : null,
+                      leading: Icon(Icons.dns_rounded,
+                          color: widget.supportsTun
+                              ? theme.colorScheme.primary
+                              : theme.colorScheme.onSurfaceVariant),
+                      title: const Text('Системный DNS'),
+                      subtitle: Text(
+                        _globalDnsSettingsLabel(_globalDnsSettings),
                       ),
+                      trailing: const Icon(Icons.chevron_right_rounded),
                     ),
                   ),
+                  const SizedBox(height: 4),
+                  Text(
+                    'Применяется в режиме TUN. Если маршрутизация включена, DNS её активного шаблона имеет приоритет.',
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: theme.colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                  const SizedBox(height: 24),
+                  Text(
+                    'Локальный SOCKS5',
+                    style: theme.textTheme.titleMedium
+                        ?.copyWith(fontWeight: FontWeight.w700),
+                  ),
+                  const SizedBox(height: 8),
+                  _buildLocalSocksAuthCard(theme, canChange, phase),
                 ],
               ),
             ),
@@ -504,6 +507,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final name = _routingSettings.activeTemplate.name;
     return '${_routingSettings.enabled ? 'Включены' : 'Выключены'} · $name';
   }
+
+  String _themeModeLabel(ThemeMode mode) => switch (mode) {
+        ThemeMode.system => 'Следовать настройкам системы',
+        ThemeMode.light => 'Светлая тема',
+        ThemeMode.dark => 'Тёмная тема',
+      };
 }
 
 String _globalDnsProviderLabel(RoutingDnsProvider provider) =>
@@ -511,10 +520,14 @@ String _globalDnsProviderLabel(RoutingDnsProvider provider) =>
       RoutingDnsProvider.internal => 'Внутренний',
       RoutingDnsProvider.google => 'Google',
       RoutingDnsProvider.cloudflare => 'Cloudflare',
+      RoutingDnsProvider.cloudflareGoogle => 'Cloudflare + Google',
       RoutingDnsProvider.quad9 => 'Quad9',
       RoutingDnsProvider.adguard => 'AdGuard',
       RoutingDnsProvider.custom => 'Свой DNS',
     };
+
+String _globalDnsSettingsLabel(GlobalDnsSettings settings) =>
+    _globalDnsProviderLabel(settings.provider);
 
 class _GlobalDnsSettingsDialog extends StatefulWidget {
   const _GlobalDnsSettingsDialog({required this.settings});
@@ -544,13 +557,15 @@ class _GlobalDnsSettingsDialogState extends State<_GlobalDnsSettingsDialog> {
   }
 
   void _selectProvider(RoutingDnsProvider provider) {
+    final previousProvider = _provider;
     final preset = RoutingDnsProviderPreset.forProvider(provider);
     if (preset != null) {
       _serverController.text = preset.server;
       _bootstrapController.text = preset.bootstrapIp;
     } else if (provider == RoutingDnsProvider.custom &&
-        _provider != RoutingDnsProvider.custom) {
-      final previousPreset = RoutingDnsProviderPreset.forProvider(_provider);
+        previousProvider != RoutingDnsProvider.custom) {
+      final previousPreset =
+          RoutingDnsProviderPreset.forProvider(previousProvider);
       if (previousPreset != null) {
         _serverController.text = previousPreset.server;
         _bootstrapController.text = previousPreset.bootstrapIp;
@@ -607,6 +622,7 @@ class _GlobalDnsSettingsDialogState extends State<_GlobalDnsSettingsDialog> {
   @override
   Widget build(BuildContext context) {
     final preset = RoutingDnsProviderPreset.forProvider(_provider);
+    final presetSettings = GlobalDnsSettings(provider: _provider);
     return AlertDialog(
       title: const Text('Системный DNS для TUN'),
       content: SizedBox(
@@ -639,19 +655,23 @@ class _GlobalDnsSettingsDialogState extends State<_GlobalDnsSettingsDialog> {
                     if (provider != null) _selectProvider(provider);
                   },
                 ),
-                if (_provider == RoutingDnsProvider.internal) ...[
+                if (preset != null) ...[
                   const SizedBox(height: 8),
                   Text(
-                    'Оставить DNS, указанный в выбранном VPN-профиле.',
+                    presetSettings.upstreams
+                        .map((upstream) =>
+                            '${upstream.server}\nДля системного DNS используется ${upstream.bootstrapIp}.')
+                        .join('\n\n'),
                     style: Theme.of(context).textTheme.bodySmall,
                   ),
-                ] else if (preset != null) ...[
-                  const SizedBox(height: 8),
-                  Text(
-                    '${preset.server}\nДля системного DNS используется ${preset.bootstrapIp}.',
-                    style: Theme.of(context).textTheme.bodySmall,
-                  ),
-                ] else ...[
+                  if (presetSettings.usesCloudflareAndGoogle) ...[
+                    const SizedBox(height: 8),
+                    Text(
+                      'Xray использует Cloudflare первым, а Google — как резерв, если не получит подходящий ответ.',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ],
+                ] else if (_provider == RoutingDnsProvider.custom) ...[
                   const SizedBox(height: 12),
                   TextFormField(
                     controller: _serverController,

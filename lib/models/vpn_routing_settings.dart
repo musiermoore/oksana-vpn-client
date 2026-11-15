@@ -22,6 +22,7 @@ enum RoutingDnsProvider {
   internal,
   google,
   cloudflare,
+  cloudflareGoogle,
   quad9,
   adguard,
   custom,
@@ -40,6 +41,10 @@ class RoutingDnsProviderPreset {
             '8.8.8.8',
           ),
         RoutingDnsProvider.cloudflare => const RoutingDnsProviderPreset(
+            'https://cloudflare-dns.com/dns-query',
+            '1.1.1.1',
+          ),
+        RoutingDnsProvider.cloudflareGoogle => const RoutingDnsProviderPreset(
             'https://cloudflare-dns.com/dns-query',
             '1.1.1.1',
           ),
@@ -66,6 +71,9 @@ class GlobalDnsSettings {
   final String? customServer;
   final String? customBootstrapIp;
 
+  bool get usesCloudflareAndGoogle =>
+      provider == RoutingDnsProvider.cloudflareGoogle;
+
   bool get enabled => provider != RoutingDnsProvider.internal;
 
   String? get server => provider == RoutingDnsProvider.custom
@@ -76,6 +84,24 @@ class GlobalDnsSettings {
       ? customBootstrapIp
       : RoutingDnsProviderPreset.forProvider(provider)?.bootstrapIp;
 
+  List<GlobalDnsUpstream> get upstreams {
+    if (usesCloudflareAndGoogle) {
+      return const [
+        GlobalDnsUpstream(
+          'https://cloudflare-dns.com/dns-query',
+          '1.1.1.1',
+        ),
+        GlobalDnsUpstream(
+          'https://dns.google/dns-query',
+          '8.8.8.8',
+        ),
+      ];
+    }
+    final value = server;
+    if (value == null || value.isEmpty) return const [];
+    return [GlobalDnsUpstream(value, bootstrapIp)];
+  }
+
   String encode() => jsonEncode({
         'provider': provider.name,
         if (customServer != null) 'customServer': customServer,
@@ -85,9 +111,12 @@ class GlobalDnsSettings {
   static GlobalDnsSettings decode(String raw) {
     final decoded = jsonDecode(raw);
     if (decoded is! Map) return const GlobalDnsSettings();
-    final provider =
-        _enumValue(RoutingDnsProvider.values, decoded['provider']) ??
-            RoutingDnsProvider.internal;
+    var provider = _enumValue(RoutingDnsProvider.values, decoded['provider']) ??
+        RoutingDnsProvider.internal;
+    if (provider == RoutingDnsProvider.cloudflare &&
+        decoded['useGoogleFallback'] == true) {
+      provider = RoutingDnsProvider.cloudflareGoogle;
+    }
     String? readString(String key) {
       final value = decoded[key];
       return value is String && value.trim().isNotEmpty ? value.trim() : null;
@@ -99,6 +128,13 @@ class GlobalDnsSettings {
       customBootstrapIp: readString('customBootstrapIp'),
     );
   }
+}
+
+class GlobalDnsUpstream {
+  const GlobalDnsUpstream(this.server, this.bootstrapIp);
+
+  final String server;
+  final String? bootstrapIp;
 }
 
 class VpnRoutingRule {
