@@ -13,8 +13,14 @@ $repositoryRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $repositoryRoot
 
 if (-not (Get-Command flutter -ErrorAction SilentlyContinue)) {
-    throw 'Flutter is not on PATH. Install Flutter and restart PowerShell.'
+    if ($env:FLUTTER_ROOT -and (Test-Path (Join-Path $env:FLUTTER_ROOT 'bin\flutter.bat'))) {
+        $env:PATH = "$(Join-Path $env:FLUTTER_ROOT 'bin');$env:PATH"
+    } else {
+        throw 'Flutter is not on PATH. Install Flutter and restart PowerShell.'
+    }
 }
+
+& (Join-Path $repositoryRoot 'scripts\prepare-windows-runtime.ps1')
 
 $bundleDirectory = Join-Path $repositoryRoot "build\windows\$Architecture\runner\Release"
 $executablePath = Join-Path $bundleDirectory 'oksana_vpn_desktop.exe'

@@ -7,6 +7,8 @@ project(runner LANGUAGES CXX)
 #
 # Any new source files that you add to the application should be added here.
 add_executable(${BINARY_NAME} WIN32
+  "deep_link_channel.cpp"
+  "windows_vpn_channel.cpp"
   "flutter_window.cpp"
   "main.cpp"
   "utils.cpp"
@@ -33,8 +35,33 @@ target_compile_definitions(${BINARY_NAME} PRIVATE "NOMINMAX")
 # Add dependency libraries and include directories. Add any application-specific
 # dependencies here.
 target_link_libraries(${BINARY_NAME} PRIVATE flutter flutter_wrapper_app)
-target_link_libraries(${BINARY_NAME} PRIVATE "dwmapi.lib")
+target_link_libraries(${BINARY_NAME} PRIVATE
+  "advapi32.lib"
+  "comdlg32.lib"
+  "dwmapi.lib"
+  "shell32.lib"
+  "winhttp.lib"
+)
 target_include_directories(${BINARY_NAME} PRIVATE "${CMAKE_SOURCE_DIR}")
 
 # Run the Flutter tool portions of the build. This must not be removed.
 add_dependencies(${BINARY_NAME} flutter_assemble)
+
+# The TUN helper is a small fixed-operation companion. It runs Xray only from
+# this app directory and exposes start/stop/status over a local named pipe.
+add_executable(oksana_vpn_privileged_helper WIN32
+  "../vpn_helper/main.cpp"
+)
+add_dependencies(${BINARY_NAME} oksana_vpn_privileged_helper)
+apply_standard_settings(oksana_vpn_privileged_helper)
+target_compile_definitions(oksana_vpn_privileged_helper PRIVATE "NOMINMAX")
+target_link_libraries(oksana_vpn_privileged_helper PRIVATE
+  "advapi32.lib"
+  "crypt32.lib"
+  "iphlpapi.lib"
+  "user32.lib"
+)
+set_target_properties(oksana_vpn_privileged_helper PROPERTIES
+  OUTPUT_NAME "oksana_vpn_privileged_helper"
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/runner"
+)

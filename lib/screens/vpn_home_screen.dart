@@ -16,6 +16,7 @@ import '../services/subscription_store.dart';
 import '../vpn/vpn_runtime.dart';
 import '../vpn/vpn_runtime_factory.dart';
 import '../vpn/vpn_connection_restarter.dart';
+import '../widgets/platform_emoji.dart';
 import 'settings_screen.dart';
 import 'subscription_screen.dart';
 
@@ -2706,11 +2707,7 @@ class _ServerOption extends StatelessWidget {
                         color:
                             selected ? colors.primary : colors.onSurfaceVariant,
                       )
-                    : Text(
-                        leadingEmoji,
-                        textAlign: TextAlign.center,
-                        style: theme.textTheme.titleMedium,
-                      ),
+                    : PlatformEmoji(value: leadingEmoji, size: 20),
               ),
               const SizedBox(width: 8),
               Expanded(
@@ -2718,14 +2715,14 @@ class _ServerOption extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    Text(
-                      title,
-                      overflow: TextOverflow.ellipsis,
-                      maxLines: 1,
+                    PlatformEmojiText(
+                      value: title,
                       style: theme.textTheme.bodyMedium?.copyWith(
                         fontWeight:
                             selected ? FontWeight.w700 : FontWeight.w500,
                       ),
+                      overflow: TextOverflow.ellipsis,
+                      maxLines: 1,
                     ),
                     if (profile.description != null)
                       Text(profile.description!,
@@ -2815,8 +2812,8 @@ bool _isEmojiCodePoint(int codePoint) {
 
 IconData _metadataIcon(String? value, IconData fallback) => switch (value) {
       'bolt' || 'automatic' => Icons.bolt_rounded,
-      'wifi' => Icons.wifi_rounded,
-      'cellular' || 'signal' => Icons.signal_cellular_alt_rounded,
+      'wifi' || '🛜' || '📡' => Icons.wifi_rounded,
+      'cellular' || 'signal' || '📶' => Icons.signal_cellular_alt_rounded,
       'layers' || 'servers' => Icons.layers_outlined,
       'link' || 'bypass' => Icons.link_rounded,
       'chat' || 'messengers' => Icons.chat_bubble_outline_rounded,

@@ -1,11 +1,17 @@
 #include "flutter_window.h"
 
 #include <optional>
+#include <utility>
 
 #include "flutter/generated_plugin_registrant.h"
 
-FlutterWindow::FlutterWindow(const flutter::DartProject& project)
-    : project_(project) {}
+FlutterWindow::FlutterWindow(
+    const flutter::DartProject& project,
+    std::vector<std::string> command_line_arguments,
+    bool protocol_registered)
+    : project_(project),
+      command_line_arguments_(std::move(command_line_arguments)),
+      protocol_registered_(protocol_registered) {}
 
 FlutterWindow::~FlutterWindow() {}
 
@@ -25,6 +31,11 @@ bool FlutterWindow::OnCreate() {
     return false;
   }
   RegisterPlugins(flutter_controller_->engine());
+  deep_link_channel_ = std::make_unique<WindowsDeepLinkChannel>(
+      flutter_controller_->engine(), command_line_arguments_,
+      protocol_registered_);
+  windows_vpn_channel_ =
+      std::make_unique<WindowsVpnChannel>(flutter_controller_->engine());
   SetChildContent(flutter_controller_->view()->GetNativeWindow());
 
   flutter_controller_->engine()->SetNextFrameCallback([&]() {
@@ -40,6 +51,8 @@ bool FlutterWindow::OnCreate() {
 }
 
 void FlutterWindow::OnDestroy() {
+  deep_link_channel_.reset();
+  windows_vpn_channel_.reset();
   if (flutter_controller_) {
     flutter_controller_ = nullptr;
   }
