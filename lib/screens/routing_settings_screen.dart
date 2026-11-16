@@ -486,7 +486,7 @@ class _RoutingSettingsScreenState extends State<RoutingSettingsScreen> {
         body: Align(
           alignment: Alignment.topCenter,
           child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 680),
+            constraints: const BoxConstraints(maxWidth: 1100),
             child: Column(
               children: [
                 Expanded(

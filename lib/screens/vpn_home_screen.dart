@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 
 import '../models/subscription_metadata.dart';
 import '../models/subscription_profile.dart';
+import '../models/profile_ping_mode.dart';
 import '../models/local_socks_auth_settings.dart';
 import '../models/vpn_routing_settings.dart';
 import '../services/app_settings_store.dart';
@@ -13,6 +14,7 @@ import '../services/auth_api.dart';
 import '../services/auth_store.dart';
 import '../services/subscription_api.dart';
 import '../services/subscription_store.dart';
+import '../services/profile_ping_service.dart';
 import '../vpn/vpn_runtime.dart';
 import '../vpn/vpn_runtime_factory.dart';
 import '../vpn/vpn_connection_restarter.dart';
@@ -22,6 +24,12 @@ import 'subscription_screen.dart';
 
 final _connectivityTestUri =
     Uri.https('connectivitycheck.gstatic.com', '/generate_204');
+
+String _profilePingModeLabel(ProfilePingMode mode) => switch (mode) {
+      ProfilePingMode.http => 'HTTP',
+      ProfilePingMode.tcp => 'TCP',
+      ProfilePingMode.icmp => 'ICMP',
+    };
 
 int _compareGroupOrders(int? a, int? b) {
   if (a == null) return b == null ? 0 : 1;
@@ -89,6 +97,7 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
   LocalSocksAuthSettings _localSocksAuthSettings =
       const LocalSocksAuthSettings();
   ThemeMode _selectedThemeMode = ThemeMode.system;
+  ProfilePingMode _profilePingMode = ProfilePingMode.http;
   late int _selectedTab = widget.initialTab;
   bool _switchingServer = false;
   bool _restartingForSettings = false;
@@ -168,6 +177,7 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
     try {
       final mode = await _settingsStore.readVpnMode();
       final themeMode = await _settingsStore.readThemeMode();
+      final profilePingMode = await _settingsStore.readProfilePingMode();
       final routingSettings = await _settingsStore.readRoutingSettings();
       final globalDnsSettings = await _settingsStore.readGlobalDnsSettings();
       final localSocksAuthSettings =
@@ -176,6 +186,7 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
       setState(() {
         if (mode != null && _runtime.supports(mode)) _selectedMode = mode;
         if (themeMode != null) _selectedThemeMode = themeMode;
+        if (profilePingMode != null) _profilePingMode = profilePingMode;
         _routingSettings = routingSettings;
         _globalDnsSettings = globalDnsSettings;
         _localSocksAuthSettings = localSocksAuthSettings;
@@ -586,14 +597,25 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
   }
 
   Future<int> _measureProfile(SubscriptionProfile profile) async {
-    final runtime = _runtime;
-    if (runtime is! VpnConnectivityProbe) return -1;
     try {
-      return await (runtime as VpnConnectivityProbe)
-          .probeConnectivity(profile, _connectivityTestUri);
+      return await ProfilePingService.measure(
+        profile: profile,
+        mode: _profilePingMode,
+        runtime: _runtime,
+        httpTestUri: _connectivityTestUri,
+      );
     } catch (_) {
       return -1;
     }
+  }
+
+  void _selectProfilePingMode(ProfilePingMode mode) {
+    if (mode == _profilePingMode) return;
+    setState(() {
+      _profilePingMode = mode;
+      _pingResults.clear();
+    });
+    unawaited(_settingsStore.saveProfilePingMode(mode).catchError((_) {}));
   }
 
   Future<void> _pingAllProfiles() async {
@@ -815,22 +837,14 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
     } else {
       await saving;
     }
-    if (wasRunning || !mounted) return;
-    final hint = mode == VpnMode.tun
-        ? 'Весь системный трафик пойдёт через VPN. Может потребоваться разрешение на изменение сетевых настроек.'
-        : _localSocksAuthSettings.enabled
-            ? 'Proxy доступен через локальные порты. Для SOCKS5 используйте логин и пароль из настроек.'
-            : 'VPN будет доступен приложениям через локальные SOCKS/HTTP порты.';
-    ScaffoldMessenger.of(context)
-      ..hideCurrentSnackBar()
-      ..showSnackBar(
-        SnackBar(
-          content: Text(hint),
-          width: 420,
-          behavior: SnackBarBehavior.floating,
-          duration: const Duration(seconds: 4),
-        ),
-      );
+  }
+
+  void _setModeFromDesktop(VpnMode mode) {
+    unawaited(_changeMode(mode).catchError((Object error) {
+      _showMessage(error is VpnRuntimeException
+          ? error.message
+          : 'Не удалось изменить режим VPN.');
+    }));
   }
 
   Future<void> _saveVpnMode(VpnMode mode) async {
@@ -1023,76 +1037,110 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
             !_refreshingSubscriptions;
         final colors = Theme.of(context).colorScheme;
         return Scaffold(
-          body: Stack(
-            children: [
-              SafeArea(
-                child: Align(
-                  alignment: Alignment.topCenter,
-                  child: ConstrainedBox(
-                    constraints: const BoxConstraints(maxWidth: 680),
-                    child: switch (_selectedTab) {
-                      0 => _buildConnectionView(
-                          state: state,
-                          isBusy: isBusy,
-                          isRunning: isRunning,
-                        ),
-                      1 => _buildSubscriptionsView(canUpdate: canUpdate),
-                      _ => _buildProfileView(canUpdate: canUpdate),
-                    },
+          body: LayoutBuilder(
+            builder: (context, constraints) {
+              final isDesktop = constraints.maxWidth >= 1180;
+              final content = switch (_selectedTab) {
+                0 => _buildConnectionView(
+                    state: state,
+                    isBusy: isBusy,
+                    isRunning: isRunning,
                   ),
-                ),
-              ),
-              Positioned(
-                left: 0,
-                right: 0,
-                bottom: 0,
-                child: SafeArea(
-                  top: false,
-                  child: Padding(
-                    padding: const EdgeInsets.only(bottom: 6),
-                    child: SizedBox(
-                      height: 42,
-                      child: Center(
-                        child: FittedBox(
-                          fit: BoxFit.scaleDown,
-                          child: Material(
-                            color: colors.surface,
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(24),
-                              side: BorderSide(color: colors.outlineVariant),
-                            ),
-                            child: Padding(
-                              padding: const EdgeInsets.all(4),
-                              child: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  _CompactNavItem(
-                                    icon: Icons.home_outlined,
-                                    selectedIcon: Icons.home_rounded,
-                                    label: 'Главная',
-                                    selected: _selectedTab == 0,
-                                    onTap: () =>
-                                        setState(() => _selectedTab = 0),
+                1 => _buildSubscriptionsView(
+                    canUpdate: canUpdate,
+                    desktop: isDesktop,
+                  ),
+                _ => _buildProfileView(
+                    canUpdate: canUpdate,
+                    desktop: isDesktop,
+                  ),
+              };
+
+              if (isDesktop) {
+                return Row(
+                  children: [
+                    _buildDesktopSidebar(
+                      background: colors.surface,
+                      enabled: !isBusy && !_switchingServer,
+                    ),
+                    Expanded(
+                      child: SafeArea(
+                        child: Padding(
+                          padding: const EdgeInsets.fromLTRB(24, 24, 24, 0),
+                          child: content,
+                        ),
+                      ),
+                    ),
+                  ],
+                );
+              }
+
+              return Stack(
+                children: [
+                  SafeArea(
+                    child: Align(
+                      alignment: Alignment.topCenter,
+                      child: ConstrainedBox(
+                        constraints: const BoxConstraints(maxWidth: 680),
+                        child: content,
+                      ),
+                    ),
+                  ),
+                  Positioned(
+                    left: 0,
+                    right: 0,
+                    bottom: 0,
+                    child: SafeArea(
+                      top: false,
+                      child: Padding(
+                        padding: const EdgeInsets.only(bottom: 6),
+                        child: SizedBox(
+                          height: 42,
+                          child: Center(
+                            child: FittedBox(
+                              fit: BoxFit.scaleDown,
+                              child: Material(
+                                color: colors.surface,
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(24),
+                                  side: BorderSide(
+                                    color: colors.outlineVariant,
                                   ),
-                                  const SizedBox(width: 4),
-                                  _CompactNavItem(
-                                    icon: Icons.credit_card_outlined,
-                                    selectedIcon: Icons.credit_card_rounded,
-                                    label: 'Подписки',
-                                    selected: _selectedTab == 1,
-                                    onTap: () =>
-                                        setState(() => _selectedTab = 1),
+                                ),
+                                child: Padding(
+                                  padding: const EdgeInsets.all(4),
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      _CompactNavItem(
+                                        icon: Icons.home_outlined,
+                                        selectedIcon: Icons.home_rounded,
+                                        label: 'Главная',
+                                        selected: _selectedTab == 0,
+                                        onTap: () =>
+                                            setState(() => _selectedTab = 0),
+                                      ),
+                                      const SizedBox(width: 4),
+                                      _CompactNavItem(
+                                        icon: Icons.credit_card_outlined,
+                                        selectedIcon: Icons.credit_card_rounded,
+                                        label: 'Подписки',
+                                        selected: _selectedTab == 1,
+                                        onTap: () =>
+                                            setState(() => _selectedTab = 1),
+                                      ),
+                                      const SizedBox(width: 4),
+                                      _CompactNavItem(
+                                        icon: Icons.person_outline_rounded,
+                                        selectedIcon: Icons.person_rounded,
+                                        label: 'Профиль',
+                                        selected: _selectedTab == 2,
+                                        onTap: () =>
+                                            setState(() => _selectedTab = 2),
+                                      ),
+                                    ],
                                   ),
-                                  const SizedBox(width: 4),
-                                  _CompactNavItem(
-                                    icon: Icons.person_outline_rounded,
-                                    selectedIcon: Icons.person_rounded,
-                                    label: 'Профиль',
-                                    selected: _selectedTab == 2,
-                                    onTap: () =>
-                                        setState(() => _selectedTab = 2),
-                                  ),
-                                ],
+                                ),
                               ),
                             ),
                           ),
@@ -1100,16 +1148,336 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
                       ),
                     ),
                   ),
-                ),
-              ),
-            ],
+                ],
+              );
+            },
           ),
         );
       },
     );
   }
 
+  Widget _buildDesktopSidebar({
+    required Color background,
+    required bool enabled,
+  }) {
+    final theme = Theme.of(context);
+    final colors = theme.colorScheme;
+    return Container(
+      width: 240,
+      decoration: BoxDecoration(
+        color: background,
+        border: Border(right: BorderSide(color: colors.outlineVariant)),
+      ),
+      child: SafeArea(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(22, 22, 16, 20),
+              child: Row(
+                children: [
+                  Image.asset(
+                    'assets/brand/oksana-logo.png',
+                    width: 36,
+                    height: 36,
+                    fit: BoxFit.contain,
+                  ),
+                  const SizedBox(width: 11),
+                  Text(
+                    'Oksana VPN',
+                    style: theme.textTheme.titleMedium
+                        ?.copyWith(fontWeight: FontWeight.w800),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 12),
+            Expanded(
+              child: Column(
+                children: [
+                  _DesktopNavItem(
+                    icon: Icons.home_outlined,
+                    selectedIcon: Icons.home_rounded,
+                    label: 'Главная',
+                    selected: _selectedTab == 0,
+                    onTap: () => setState(() => _selectedTab = 0),
+                  ),
+                  _DesktopNavItem(
+                    icon: Icons.credit_card_outlined,
+                    selectedIcon: Icons.credit_card_rounded,
+                    label: 'Подписки',
+                    selected: _selectedTab == 1,
+                    onTap: () => setState(() => _selectedTab = 1),
+                  ),
+                  _DesktopNavItem(
+                    icon: Icons.person_outline_rounded,
+                    selectedIcon: Icons.person_rounded,
+                    label: 'Профиль',
+                    selected: _selectedTab == 2,
+                    onTap: () => setState(() => _selectedTab = 2),
+                  ),
+                ],
+              ),
+            ),
+            _DesktopNavItem(
+              icon: Icons.settings_outlined,
+              selectedIcon: Icons.settings_rounded,
+              label: 'Настройки',
+              selected: false,
+              enabled: enabled,
+              onTap: _openSettings,
+            ),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _buildConnectionView({
+    required VpnRuntimeSnapshot state,
+    required bool isBusy,
+    required bool isRunning,
+  }) =>
+      LayoutBuilder(
+        builder: (context, constraints) => constraints.maxWidth >= 820
+            ? _buildDesktopConnectionView(
+                state: state,
+                isBusy: isBusy,
+                isRunning: isRunning,
+              )
+            : _buildCompactConnectionView(
+                state: state,
+                isBusy: isBusy,
+                isRunning: isRunning,
+              ),
+      );
+
+  Widget _buildDesktopConnectionView({
+    required VpnRuntimeSnapshot state,
+    required bool isBusy,
+    required bool isRunning,
+  }) {
+    final theme = Theme.of(context);
+    final canConnect = _runtime.supports(_selectedMode);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(4, 0, 4, 20),
+          child: Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 520),
+              child: Container(
+                width: double.infinity,
+                padding: const EdgeInsets.fromLTRB(24, 20, 24, 18),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.center,
+                  children: [
+                    _desktopModeSelector(),
+                    const SizedBox(height: 20),
+                    _PowerControl(
+                      phase: state.phase,
+                      enabled: !isBusy &&
+                          !_switchingServer &&
+                          !_pinging &&
+                          canConnect &&
+                          _selectedProfile != null,
+                      onPressed: _toggleConnection,
+                      size: 152,
+                    ),
+                    const SizedBox(height: 12),
+                    Text(
+                      _connectionHeadline(state),
+                      textAlign: TextAlign.center,
+                      style: theme.textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                    if (state.phase == VpnRuntimePhase.error &&
+                        state.errorMessage != null) ...[
+                      const SizedBox(height: 4),
+                      Text(
+                        state.errorMessage!,
+                        textAlign: TextAlign.center,
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          color: theme.colorScheme.error,
+                        ),
+                      ),
+                    ],
+                    const SizedBox(height: 8),
+                    _desktopSelectedProfileName(theme),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+        Expanded(
+          child: LayoutBuilder(
+            builder: (context, constraints) => SingleChildScrollView(
+              padding: const EdgeInsets.only(bottom: 20),
+              child: ConstrainedBox(
+                constraints: BoxConstraints(minHeight: constraints.maxHeight),
+                child: _buildSelectedSubscriptionPanel(
+                  canRefresh: state.phase == VpnRuntimePhase.disconnected &&
+                      !_switchingServer &&
+                      !_refreshingSubscriptions &&
+                      !_loadingExternal,
+                  configurationsEnabled:
+                      !isBusy && !_switchingServer && !_pinging,
+                  isRunning: isRunning,
+                  bottomPadding: 14,
+                ),
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _desktopModeSelector() {
+    final colors = Theme.of(context).colorScheme;
+    final canChangeMode = _connectionSettingsLoaded &&
+        !_switchingServer &&
+        _runtime.snapshot.phase != VpnRuntimePhase.starting &&
+        _runtime.snapshot.phase != VpnRuntimePhase.stopping;
+
+    Widget modeButton(VpnMode mode, String label) {
+      final selected = _selectedMode == mode;
+      final enabled = canChangeMode &&
+          (mode == VpnMode.proxy || _runtime.supports(VpnMode.tun));
+      return Expanded(
+        child: Semantics(
+          button: true,
+          selected: selected,
+          enabled: enabled,
+          label: label,
+          child: Material(
+            color: Colors.transparent,
+            child: InkWell(
+              onTap: enabled ? () => _setModeFromDesktop(mode) : null,
+              borderRadius: BorderRadius.circular(14),
+              child: Center(
+                child: Text(
+                  label,
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: selected
+                            ? colors.onPrimary
+                            : enabled
+                                ? colors.onSurface
+                                : colors.onSurface.withValues(alpha: 0.38),
+                        fontWeight: FontWeight.w700,
+                      ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
+    return SizedBox(
+      width: 260,
+      height: 34,
+      child: Container(
+        foregroundDecoration: BoxDecoration(
+          border: Border.all(
+              color: colors.primary.withValues(alpha: 0.5), width: 2),
+          borderRadius: BorderRadius.circular(16),
+        ),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(14),
+          child: LayoutBuilder(
+            builder: (context, constraints) => Stack(
+              children: [
+                AnimatedPositioned(
+                  duration: const Duration(milliseconds: 180),
+                  curve: Curves.easeOut,
+                  top: 0,
+                  bottom: 0,
+                  left: _selectedMode == VpnMode.proxy
+                      ? 0
+                      : constraints.maxWidth * 0.45,
+                  width: constraints.maxWidth * 0.55,
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      color: colors.primary,
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                  ),
+                ),
+                Row(
+                  children: [
+                    modeButton(VpnMode.proxy, 'Proxy'),
+                    modeButton(VpnMode.tun, 'TUN'),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _desktopSelectedProfileName(ThemeData theme) {
+    final profileName = _selectedProfile?.name;
+    if (profileName == null) {
+      return Text(
+        'Нет выбранной конфигурации',
+        textAlign: TextAlign.center,
+        style:
+            theme.textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600),
+      );
+    }
+
+    final leadingEmoji = _leadingEmoji(profileName);
+    final displayName = leadingEmoji == null
+        ? profileName
+        : profileName.trimLeft().characters.skip(1).toString().trimLeft();
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        if (leadingEmoji != null)
+          PlatformEmoji(value: leadingEmoji, size: 18)
+        else
+          Icon(
+            _metadataIcon(_selectedProfile?.icon, Icons.public_rounded),
+            size: 18,
+            color: theme.colorScheme.onSurfaceVariant,
+          ),
+        const SizedBox(width: 7),
+        if (displayName.isNotEmpty)
+          Flexible(
+            child: PlatformEmojiText(
+              value: displayName,
+              style: theme.textTheme.bodyMedium
+                  ?.copyWith(fontWeight: FontWeight.w600),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+      ],
+    );
+  }
+
+  String _connectionHeadline(VpnRuntimeSnapshot state) {
+    if (_restartingForSettings || _switchingServer) return 'Подключается';
+    return switch (state.phase) {
+      VpnRuntimePhase.starting => 'Подключается',
+      VpnRuntimePhase.stopping => 'Отключается',
+      VpnRuntimePhase.running => 'Подключен',
+      VpnRuntimePhase.error => 'Ошибка подключения',
+      VpnRuntimePhase.disconnected => 'Не подключен',
+    };
+  }
+
+  Widget _buildCompactConnectionView({
     required VpnRuntimeSnapshot state,
     required bool isBusy,
     required bool isRunning,
@@ -1123,15 +1491,11 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
         children: [
           Row(
             children: [
-              Container(
+              Image.asset(
+                'assets/brand/oksana-logo.png',
                 width: 34,
                 height: 34,
-                decoration: BoxDecoration(
-                  color: theme.colorScheme.primary.withValues(alpha: .1),
-                  borderRadius: BorderRadius.circular(11),
-                ),
-                child: Icon(Icons.shield_rounded,
-                    color: theme.colorScheme.primary, size: 20),
+                fit: BoxFit.contain,
               ),
               const SizedBox(width: 10),
               Expanded(
@@ -1163,24 +1527,17 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
                 ),
                 const SizedBox(height: 12),
                 Text(
-                  _selectedProfile?.name ?? 'Нет выбранной конфигурации',
+                  _connectionHeadline(state),
                   textAlign: TextAlign.center,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: theme.textTheme.titleMedium
-                      ?.copyWith(fontWeight: FontWeight.w700),
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  _connectionStatus(state),
-                  textAlign: TextAlign.center,
-                  style: theme.textTheme.bodyMedium?.copyWith(
+                  style: theme.textTheme.titleMedium?.copyWith(
                     color: state.phase == VpnRuntimePhase.error
                         ? theme.colorScheme.error
-                        : theme.colorScheme.onSurfaceVariant,
-                    fontWeight: FontWeight.w600,
+                        : theme.colorScheme.onSurface,
+                    fontWeight: FontWeight.w700,
                   ),
                 ),
+                const SizedBox(height: 8),
+                _desktopSelectedProfileName(theme),
               ],
             ),
           ),
@@ -1400,6 +1757,7 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
               connected: isRunning && identical(profiles[i], _selectedProfile),
               pingMs: _pingResults[profiles[i]],
               pinging: _pingingProfiles.contains(profiles[i]),
+              pingModeLabel: _profilePingModeLabel(_profilePingMode),
               enabled: enabled,
               favorite: _isFavorite(profiles[i]),
               favoriteEnabled: favoriteEnabled,
@@ -1517,11 +1875,14 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
     ]);
   }
 
-  Widget _buildSubscriptionsView({required bool canUpdate}) {
+  Widget _buildSubscriptionsView({
+    required bool canUpdate,
+    required bool desktop,
+  }) {
     final sets = _subscriptionSets();
     final canModify = canUpdate && !_loadingExternal;
     return ListView(
-      padding: const EdgeInsets.fromLTRB(8, 20, 8, 72),
+      padding: EdgeInsets.fromLTRB(8, 20, 8, desktop ? 24 : 72),
       children: [
         Row(children: [
           Expanded(
@@ -1627,6 +1988,7 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
     required bool canRefresh,
     required bool configurationsEnabled,
     required bool isRunning,
+    double bottomPadding = 14,
   }) {
     final theme = Theme.of(context);
     final metadata = _metadataFor(_activeSubscriptionKey);
@@ -1642,8 +2004,9 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
         : subscriptionTitle(_activeSubscriptionKey!);
 
     return Card(
+      margin: EdgeInsets.zero,
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(16, 12, 16, 14),
+        padding: EdgeInsets.fromLTRB(16, 12, 16, bottomPadding),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
@@ -1681,7 +2044,7 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
                 IconButton(
                   tooltip: _pingingAll
                       ? 'Проверяем все подключения…'
-                      : 'Проверить доступность всех серверов через профиль',
+                      : 'Проверить все серверы (${_profilePingModeLabel(_profilePingMode)})',
                   visualDensity: VisualDensity.compact,
                   constraints:
                       const BoxConstraints.tightFor(width: 36, height: 36),
@@ -1692,6 +2055,33 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
                   icon: _pingingAll
                       ? const _PingLoadingIcon(size: 18)
                       : const Icon(Icons.speed_rounded),
+                ),
+                PopupMenuButton<ProfilePingMode>(
+                  tooltip:
+                      'Способ проверки: ${_profilePingModeLabel(_profilePingMode)}',
+                  onSelected: _pinging ? null : _selectProfilePingMode,
+                  itemBuilder: (context) => [
+                    CheckedPopupMenuItem(
+                      value: ProfilePingMode.http,
+                      checked: _profilePingMode == ProfilePingMode.http,
+                      child: const Text('HTTP через профиль'),
+                    ),
+                    CheckedPopupMenuItem(
+                      value: ProfilePingMode.tcp,
+                      checked: _profilePingMode == ProfilePingMode.tcp,
+                      child: const Text('TCP до сервера'),
+                    ),
+                    CheckedPopupMenuItem(
+                      value: ProfilePingMode.icmp,
+                      checked: _profilePingMode == ProfilePingMode.icmp,
+                      child: const Text('ICMP до сервера'),
+                    ),
+                  ],
+                  child: const SizedBox(
+                    width: 36,
+                    height: 36,
+                    child: Icon(Icons.tune_rounded, size: 19),
+                  ),
                 ),
                 const SizedBox(width: 4),
                 PopupMenuButton<String>(
@@ -2044,7 +2434,10 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
     );
   }
 
-  Widget _buildProfileView({required bool canUpdate}) {
+  Widget _buildProfileView({
+    required bool canUpdate,
+    required bool desktop,
+  }) {
     final theme = Theme.of(context);
     final account = _accountProfile;
     final expiry =
@@ -2054,7 +2447,7 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
     final colors = theme.colorScheme;
 
     return ListView(
-      padding: const EdgeInsets.fromLTRB(8, 20, 8, 72),
+      padding: EdgeInsets.fromLTRB(8, 20, 8, desktop ? 24 : 72),
       children: [
         if (widget.authToken != null)
           Card(
@@ -2450,22 +2843,94 @@ class _VpnHomeScreenState extends State<VpnHomeScreen> {
   String _formatNumber(num value) => value % 1 == 0
       ? value.toStringAsFixed(0)
       : value.toStringAsFixed(1).replaceAll('.', ',');
+}
 
-  String _connectionStatus(VpnRuntimeSnapshot state) {
-    if (_restartingForSettings) return 'Применяем настройки…';
-    if (_switchingServer) return 'Переключаем сервер…';
-    return switch (state.phase) {
-      VpnRuntimePhase.starting =>
-        _selectedMode == VpnMode.tun ? 'Подключаем VPN…' : 'Запускаем proxy…',
-      VpnRuntimePhase.running => _selectedMode == VpnMode.tun
-          ? 'VPN включён'
-          : state.localProxyPorts.isEmpty
-              ? 'Proxy запущен'
-              : 'Proxy запущен · порты ${state.localProxyPorts.join(', ')}',
-      VpnRuntimePhase.stopping => 'Отключаем…',
-      VpnRuntimePhase.error => 'Не удалось подключиться',
-      VpnRuntimePhase.disconnected => 'Не подключено',
-    };
+class _DesktopNavItem extends StatefulWidget {
+  const _DesktopNavItem({
+    required this.icon,
+    required this.selectedIcon,
+    required this.label,
+    required this.selected,
+    this.enabled = true,
+    required this.onTap,
+  });
+
+  final IconData icon;
+  final IconData selectedIcon;
+  final String label;
+  final bool selected;
+  final bool enabled;
+  final VoidCallback onTap;
+
+  @override
+  State<_DesktopNavItem> createState() => _DesktopNavItemState();
+}
+
+class _DesktopNavItemState extends State<_DesktopNavItem> {
+  bool _hovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    final foreground = !widget.enabled
+        ? colors.onSurface.withValues(alpha: .38)
+        : widget.selected
+            ? colors.onPrimaryContainer
+            : colors.onSurface;
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 3),
+      child: MouseRegion(
+        onEnter: (_) {
+          if (widget.enabled) setState(() => _hovered = true);
+        },
+        onExit: (_) => setState(() => _hovered = false),
+        child: Material(
+          color: widget.selected
+              ? colors.primaryContainer
+              : widget.enabled && _hovered
+                  ? colors.onSurface.withValues(alpha: .07)
+                  : Colors.transparent,
+          borderRadius: BorderRadius.circular(12),
+          child: InkWell(
+            onTap: widget.enabled ? widget.onTap : null,
+            mouseCursor: widget.enabled
+                ? SystemMouseCursors.click
+                : SystemMouseCursors.basic,
+            borderRadius: BorderRadius.circular(12),
+            child: Semantics(
+              button: true,
+              selected: widget.selected,
+              label: widget.label,
+              child: Padding(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                child: Row(
+                  children: [
+                    Icon(
+                      widget.selected ? widget.selectedIcon : widget.icon,
+                      size: 20,
+                      color: foreground,
+                    ),
+                    const SizedBox(width: 14),
+                    Expanded(
+                      child: Text(
+                        widget.label,
+                        style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                              color: foreground,
+                              fontWeight: widget.selected
+                                  ? FontWeight.w700
+                                  : FontWeight.w500,
+                            ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
   }
 }
 
@@ -2564,11 +3029,13 @@ class _PowerControl extends StatelessWidget {
     required this.phase,
     required this.enabled,
     required this.onPressed,
+    this.size = 110,
   });
 
   final VpnRuntimePhase phase;
   final bool enabled;
   final VoidCallback onPressed;
+  final double size;
 
   @override
   Widget build(BuildContext context) {
@@ -2577,52 +3044,58 @@ class _PowerControl extends StatelessWidget {
     final busy =
         phase == VpnRuntimePhase.starting || phase == VpnRuntimePhase.stopping;
     final active = running || phase == VpnRuntimePhase.stopping;
-    final color = active ? const Color(0xFF16A36A) : colors.primary;
-    final isFilled = active || phase == VpnRuntimePhase.starting;
+    final color = colors.primary;
+    final iconSize = size * 0.42;
 
     return SizedBox.square(
-      dimension: 116,
+      dimension: size,
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 260),
         decoration: BoxDecoration(
           shape: BoxShape.circle,
           boxShadow: [
             BoxShadow(
-              color: color.withValues(alpha: running ? 0.34 : 0.1),
-              blurRadius: running ? 38 : 20,
-              spreadRadius: running ? 3 : 0,
+              color: color.withValues(alpha: running ? 0.26 : 0.08),
+              blurRadius: running ? 28 : 16,
+              spreadRadius: running ? 2 : 0,
             ),
           ],
         ),
-        child: IconButton(
-          onPressed: enabled ? onPressed : null,
-          icon: busy
-              ? SizedBox(
-                  width: 38,
-                  height: 38,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 3,
-                    color: isFilled ? Colors.white : colors.primary,
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            IconButton(
+              onPressed: enabled ? onPressed : null,
+              icon: Icon(Icons.power_settings_new_rounded, size: iconSize),
+              style: IconButton.styleFrom(
+                fixedSize: Size(size, size),
+                backgroundColor: active ? color : Colors.transparent,
+                disabledBackgroundColor:
+                    active ? color.withValues(alpha: 0.65) : Colors.transparent,
+                foregroundColor: active ? colors.onPrimary : color,
+                disabledForegroundColor: active
+                    ? colors.onPrimary.withValues(alpha: 0.7)
+                    : color.withValues(alpha: 0.6),
+                side: active
+                    ? BorderSide.none
+                    : BorderSide(color: color, width: 2),
+                shape: const CircleBorder(),
+              ),
+            ),
+            if (busy)
+              Positioned.fill(
+                child: IgnorePointer(
+                  child: Padding(
+                    padding: const EdgeInsets.all(2),
+                    child: CircularProgressIndicator(
+                      strokeWidth: 4,
+                      color: color,
+                      strokeAlign: BorderSide.strokeAlignOutside,
+                    ),
                   ),
-                )
-              : Icon(
-                  running
-                      ? Icons.power_settings_new_rounded
-                      : Icons.play_arrow_rounded,
-                  size: 50,
                 ),
-          style: IconButton.styleFrom(
-            fixedSize: const Size(116, 116),
-            backgroundColor: isFilled ? color : Colors.transparent,
-            disabledBackgroundColor:
-                isFilled ? color.withValues(alpha: 0.65) : Colors.transparent,
-            foregroundColor: isFilled ? Colors.white : colors.primary,
-            disabledForegroundColor: isFilled
-                ? Colors.white70
-                : colors.primary.withValues(alpha: 0.6),
-            side: BorderSide(color: color, width: 2),
-            shape: const CircleBorder(),
-          ),
+              ),
+          ],
         ),
       ),
     );
@@ -2651,6 +3124,7 @@ class _ServerOption extends StatelessWidget {
     required this.connected,
     required this.pingMs,
     required this.pinging,
+    required this.pingModeLabel,
     required this.enabled,
     required this.favorite,
     required this.favoriteEnabled,
@@ -2664,6 +3138,7 @@ class _ServerOption extends StatelessWidget {
   final bool connected;
   final int? pingMs;
   final bool pinging;
+  final String pingModeLabel;
   final bool enabled;
   final bool favorite;
   final bool favoriteEnabled;
@@ -2695,7 +3170,7 @@ class _ServerOption extends StatelessWidget {
         onTap: enabled ? onTap : null,
         borderRadius: BorderRadius.circular(12),
         child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+          padding: const EdgeInsets.fromLTRB(10, 4, 6, 4),
           child: Row(
             children: [
               SizedBox(
@@ -2754,7 +3229,7 @@ class _ServerOption extends StatelessWidget {
                   ),
                 ),
               IconButton(
-                tooltip: 'Проверить доступность через профиль',
+                tooltip: 'Проверить доступность ($pingModeLabel)',
                 visualDensity: VisualDensity.compact,
                 onPressed: enabled && !pinging ? onPing : null,
                 icon: pinging

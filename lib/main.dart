@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io' show Platform;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -27,6 +28,7 @@ class OksanaVpnApp extends StatefulWidget {
 
 class _OksanaVpnAppState extends State<OksanaVpnApp> {
   static const _deepLinkChannel = MethodChannel('oksanavpn/deep_links');
+  static const _windowsThemeChannel = MethodChannel('oksanavpn/vpn_runtime');
   final _navigatorKey = GlobalKey<NavigatorState>();
   final _messengerKey = GlobalKey<ScaffoldMessengerState>();
   final _authApi = AuthApi();
@@ -34,6 +36,7 @@ class _OksanaVpnAppState extends State<OksanaVpnApp> {
   final _settingsStore = const AppSettingsStore();
   final Set<String> _handledTickets = {};
   ThemeMode _themeMode = ThemeMode.system;
+  Brightness _windowsSystemBrightness = Brightness.light;
   bool _ready = false;
   bool _authenticating = false;
 
@@ -41,6 +44,12 @@ class _OksanaVpnAppState extends State<OksanaVpnApp> {
   void initState() {
     super.initState();
     _deepLinkChannel.setMethodCallHandler(_handleNativeCall);
+    if (Platform.isWindows) {
+      _windowsSystemBrightness =
+          WidgetsBinding.instance.platformDispatcher.platformBrightness;
+      _windowsThemeChannel.setMethodCallHandler(_handleWindowsThemeCall);
+      unawaited(_readWindowsSystemBrightness());
+    }
     unawaited(_restoreThemeMode());
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _ready = true;
@@ -62,6 +71,43 @@ class _OksanaVpnAppState extends State<OksanaVpnApp> {
     unawaited(_saveThemeMode(mode));
   }
 
+  ThemeMode get _effectiveThemeMode {
+    if (!Platform.isWindows || _themeMode != ThemeMode.system) {
+      return _themeMode;
+    }
+    return _windowsSystemBrightness == Brightness.dark
+        ? ThemeMode.dark
+        : ThemeMode.light;
+  }
+
+  Future<void> _readWindowsSystemBrightness() async {
+    try {
+      _applyWindowsSystemBrightness(
+        await _windowsThemeChannel.invokeMethod<String>('getSystemBrightness'),
+      );
+    } on PlatformException {
+      // Leave Flutter's default system brightness in place if unavailable.
+    } on MissingPluginException {
+      // Non-Windows runners do not register the Windows theme method.
+    }
+  }
+
+  Future<void> _handleWindowsThemeCall(MethodCall call) async {
+    if (call.method == 'systemThemeChanged') {
+      _applyWindowsSystemBrightness(call.arguments);
+    }
+  }
+
+  void _applyWindowsSystemBrightness(Object? value) {
+    final brightness = switch (value) {
+      'dark' => Brightness.dark,
+      'light' => Brightness.light,
+      _ => null,
+    };
+    if (brightness == null || brightness == _windowsSystemBrightness) return;
+    if (mounted) setState(() => _windowsSystemBrightness = brightness);
+  }
+
   Future<void> _saveThemeMode(ThemeMode mode) async {
     try {
       await _settingsStore.saveThemeMode(mode);
@@ -73,6 +119,9 @@ class _OksanaVpnAppState extends State<OksanaVpnApp> {
   @override
   void dispose() {
     _deepLinkChannel.setMethodCallHandler(null);
+    if (Platform.isWindows) {
+      _windowsThemeChannel.setMethodCallHandler(null);
+    }
     _authApi.close();
     super.dispose();
   }
@@ -172,7 +221,7 @@ class _OksanaVpnAppState extends State<OksanaVpnApp> {
       scaffoldMessengerKey: _messengerKey,
       theme: AppTheme.light,
       darkTheme: AppTheme.dark,
-      themeMode: _themeMode,
+      themeMode: _effectiveThemeMode,
       home: SubscriptionScreen(
         themeMode: _themeMode,
         onThemeModeChanged: _setThemeMode,

@@ -1,7 +1,5 @@
 import 'package:flutter/material.dart';
 
-import '../app_theme.dart';
-
 class BrandHeader extends StatelessWidget {
   const BrandHeader({
     super.key,
@@ -17,23 +15,11 @@ class BrandHeader extends StatelessWidget {
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Container(
+        Image.asset(
+          'assets/brand/oksana-logo.png',
           width: 48,
           height: 48,
-          decoration: BoxDecoration(
-            gradient: const LinearGradient(
-                colors: [AppTheme.primary, Color(0xFFA855F7)]),
-            borderRadius: BorderRadius.circular(15),
-            boxShadow: [
-              BoxShadow(
-                color: AppTheme.primary.withValues(alpha: 0.18),
-                blurRadius: 20,
-                offset: const Offset(0, 8),
-              ),
-            ],
-          ),
-          child:
-              const Icon(Icons.shield_rounded, color: Colors.white, size: 25),
+          fit: BoxFit.contain,
         ),
         const SizedBox(width: 14),
         Expanded(

@@ -11,6 +11,7 @@ class WindowsVpnChannel {
  public:
   explicit WindowsVpnChannel(flutter::FlutterEngine* engine);
   ~WindowsVpnChannel();
+  void NotifySystemThemeChanged();
   WindowsVpnChannel(const WindowsVpnChannel&) = delete;
   WindowsVpnChannel& operator=(const WindowsVpnChannel&) = delete;
 

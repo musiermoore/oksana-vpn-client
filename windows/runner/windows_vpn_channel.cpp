@@ -17,6 +17,18 @@ constexpr wchar_t kPipeName[] = L"\\\\.\\pipe\\OksanaVpnRuntime-v1";
 constexpr size_t kMaxConfigSize = 8 * 1024 * 1024;
 constexpr size_t kMaxGeoDataSize = 32 * 1024 * 1024;
 constexpr size_t kMaxPayloadSize = kMaxConfigSize + 2 * kMaxGeoDataSize + 12;
+constexpr wchar_t kPreferredBrightnessKey[] =
+    L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize";
+constexpr wchar_t kPreferredBrightnessValue[] = L"AppsUseLightTheme";
+
+std::string ReadSystemBrightness() {
+  DWORD light_mode = 1;
+  DWORD value_size = sizeof(light_mode);
+  const LSTATUS status = RegGetValueW(
+      HKEY_CURRENT_USER, kPreferredBrightnessKey, kPreferredBrightnessValue,
+      RRF_RT_REG_DWORD, nullptr, &light_mode, &value_size);
+  return status == ERROR_SUCCESS && light_mode == 0 ? "dark" : "light";
+}
 
 std::wstring ExecutableDirectory() {
   std::array<wchar_t, 32768> path{};
@@ -125,9 +137,21 @@ WindowsVpnChannel::~WindowsVpnChannel() {
   }
 }
 
+void WindowsVpnChannel::NotifySystemThemeChanged() {
+  if (channel_) {
+    channel_->InvokeMethod(
+        "systemThemeChanged",
+        std::make_unique<flutter::EncodableValue>(ReadSystemBrightness()));
+  }
+}
+
 void WindowsVpnChannel::HandleMethodCall(
     const flutter::MethodCall<flutter::EncodableValue>& call,
     std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
+  if (call.method_name() == "getSystemBrightness") {
+    result->Success(flutter::EncodableValue(ReadSystemBrightness()));
+    return;
+  }
   if (call.method_name() != "request" || !call.arguments() ||
       !std::holds_alternative<flutter::EncodableMap>(*call.arguments())) {
     result->NotImplemented();

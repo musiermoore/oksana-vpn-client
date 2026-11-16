@@ -34,7 +34,7 @@ class AppearanceSettingsScreen extends StatelessWidget {
       body: Align(
         alignment: Alignment.topCenter,
         child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 680),
+          constraints: const BoxConstraints(maxWidth: 900),
           child: ListView(
             padding: const EdgeInsets.fromLTRB(16, 20, 16, 28),
             children: [

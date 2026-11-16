@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../models/local_socks_auth_settings.dart';
+import '../models/profile_ping_mode.dart';
 import '../models/vpn_routing_settings.dart';
 import '../vpn/vpn_runtime.dart';
 import 'secure_app_state_store.dart';
@@ -13,6 +14,20 @@ class AppSettingsStore {
   static const _vpnRoutingSettingsKey = 'vpn_routing_settings';
   static const _globalDnsSettingsKey = 'global_dns_settings';
   static const _localSocksAuthSettingsKey = 'local_socks_auth_settings';
+  static const _profilePingModeKey = 'profile_ping_mode';
+
+  Future<ProfilePingMode?> readProfilePingMode() async {
+    final value = await SecureAppStateStore.read(_profilePingModeKey);
+    return switch (value) {
+      'http' => ProfilePingMode.http,
+      'tcp' => ProfilePingMode.tcp,
+      'icmp' => ProfilePingMode.icmp,
+      _ => null,
+    };
+  }
+
+  Future<void> saveProfilePingMode(ProfilePingMode mode) =>
+      SecureAppStateStore.write(_profilePingModeKey, mode.name);
   Future<ThemeMode?> readThemeMode() async {
     final value = await SecureAppStateStore.read(_themeModeKey);
     return switch (value) {
